@@ -1,7 +1,8 @@
 //Glacc XM Module Player
-//Glacc 2021-01-10
+//Glacc 2024-07-13
 //
-//  Change log:
+//      2024-07-13  Updated coding style
+//                  Added SFML/Audio support
 //
 //      2021-01-10  Fixed arpeggio note not update at last tick per row
 //
@@ -51,6 +52,11 @@
 //      E4x Vibrato control
 //      E7x Tremolo control
 
+//#include "xmPlayer.h"
+
+#define _SDL2
+//#define _SFML
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -59,9 +65,14 @@
 #include <algorithm>
 #include <time.h>
 
+#ifdef _SDL2
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_stdinc.h>
 #include <SDL2/SDL_audio.h>
+#endif
+#ifdef _SFML
+#include <SFML/Audio.hpp>
+#endif
 
 #define SMP_RATE 44100
 #define BUFFER_SIZE 4096
@@ -78,2582 +89,2661 @@
 #define INT_MASK 0xFFFF
 
 #define NOTE_SIZE_XM 5
-#define ROW_SIZE_XM NOTE_SIZE_XM*NumOfChannels
+#define ROW_SIZE_XM NOTE_SIZE_XM * numOfChannels
 
 namespace GXMPlayer
 {
-    SDL_AudioSpec AudioSpec, ActualSpec;
-    SDL_AudioDeviceID DeviceID;
-
-    #define MIN(a, b) ((a) < (b) ? (a) : (b))
-    #define MAX(a, b) ((a) > (b) ? (a) : (b))
-
-    static char SongName[21];
-    static char TrackerName[21];
-    static int16_t TrackerVersion;
-
-    static bool Loop;
-    static bool Stereo;
-    static double Amp = 1;
-    static bool IgnoreF00 = false;
-    static int8_t PanMode = 0;
-
-    static int BufferSize;
-    static int SamplingRate;
-    static bool Playing = false;
-    static bool Interpolation;
-    static uint8_t MasterVol;
-
-    static bool AmigaFreqTable;
-    static int16_t NumOfChannels;
-    static int16_t NumOfPatterns;
-    static int16_t NumOfInstruments;
-    static uint8_t OrderTable[256];
-
-    static int16_t SongLength;
-    static int16_t RstPos;
-    static int16_t DefaultTempo;
-    static int16_t DefaultSpd;
-
-    static uint8_t *SongData;
-    static uint8_t *PatternData;
-    static int8_t *SampleData;
-    //static int16_t *SndBuffer[2];
-
-    struct Instrument
-    {
-        int16_t SampleNum;
-        int16_t FadeOut;
-        int16_t SampleMap[96];
-        int16_t VolEnvelops[24];
-        int16_t PanEnvelops[24];
-        char Name[23];
-        int8_t VolPoints;
-        int8_t PanPoints;
-        uint8_t VolSustainPt;
-        uint8_t VolLoopStart;
-        uint8_t VolLoopEnd;
-        uint8_t PanSustainPt;
-        uint8_t PanLoopStart;
-        uint8_t PanLoopEnd;
-        int8_t VolType;
-        int8_t PanType;
-        int8_t VibratoType;
-        int8_t VibratoSweep;
-        int8_t VibratoDepth;
-        int8_t VibratoRate;
-    };
-
-    struct Sample
-    {
-        int32_t Length;
-        int32_t LoopStart;
-        int32_t LoopLength;
-        int8_t *Data;
-        int8_t Volume;
-        int8_t FineTune;
-        int8_t Type;
-        int8_t RelNote;
-        uint8_t OrigInst;
-        bool Is16Bit;
-        uint8_t Pan;
-        char Name[23];
-    };
-
-    static int32_t TotalPatSize;
-    static int32_t TotalInstSize;
-    static int32_t TotalSampleSize;
-    static int32_t TotalSampleNum;
-    static int32_t PatternAddr[256];
-    static Instrument *Instruments;
-    static Sample *Samples;
-    static int16_t *SampleStartIndex;
-    static int32_t *SampleHeaderAddr;
-
-    static int16_t Tick, CurRow, CurPos;
-    static int16_t PatBreak, PatJump, PatDelay;
-    static int16_t PatRepeat, RepeatPos, RepeatTo;
-    static uint8_t Speed, Tempo, GlobalVol;
-    static int32_t SampleToNextTick;
-    static double Timer, TimePerSample, TimePerTick, SamplePerTick;
-    static bool SongLoaded = false;
-    static double AmpFinal;
-
-    static long StartTime, EndTime, ExcuteTime;
-
-    static uint8_t VibTab[32] =
-    {
-          0, 24, 49, 74, 97,120,141,161,
-        180,197,212,224,235,244,250,253,
-        255,253,250,244,235,224,212,197,
-        180,161,141,120, 97, 74, 49, 24
-    };
-
-    static uint16_t PeriodTab[105] =
-    {
-        907,900,894,887,881,875,868,862,856,850,844,838,832,826,820,814,
-        808,802,796,791,785,779,774,768,762,757,752,746,741,736,730,725,
-        720,715,709,704,699,694,689,684,678,675,670,665,660,655,651,646,
-        640,636,632,628,623,619,614,610,604,601,597,592,588,584,580,575,
-        570,567,563,559,555,551,547,543,538,535,532,528,524,520,516,513,
-        508,505,502,498,494,491,487,484,480,477,474,470,467,463,460,457,
-        453,450,447,445,442,439,436,433,428
-    };
-
-    static int8_t FineTuneTable[32] =
-    {
-           0,  16,  32,  48,  64,  80,  96, 112,
-        -128,-112, -96, -80, -64, -48, -32, -16,
-        -128,-112, -96, -80, -64, -48, -32, -16,
-           0,  16,  32,  48,  64,  80,  96, 112
-    };
-
-    static int8_t RxxVolSlideTable[16] =
-    {
-        0, -1, -2, -4, -8, -16,  0,  0,
-        0,  1,  2,  4,  8,  16,  0,  0
-    };
-
-    struct Channel
-    {
-        int8_t Note;
-        int8_t RelNote;
-        int8_t NoteArpeggio;
-        uint8_t LastNote;
-        int8_t FineTune;
-
-        uint8_t Instrument;
-        uint8_t NextInstrument;
-        uint8_t LastInstrument;
-
-        uint8_t VolCmd;
-        uint8_t VolPara;
-        int16_t Volume;
-        int16_t LastVol;
-        int16_t SmpPlaying;
-        int16_t Sample;
-        int16_t Pan;
-        int16_t PanFinal;
-        int16_t VolEnvelope;
-        int16_t PanEnvelope;
-        int16_t Delay;
-        int16_t RxxCounter;
-        int16_t FadeTick;
-        uint8_t Effect;
-        uint8_t Parameter;
-
-        uint8_t VibratoPos;
-        uint8_t VibratoAmp;
-        uint8_t VibratoType;
-        bool VolVibrato;
-        uint8_t TremorPos;
-        uint8_t TremorAmp;
-        uint8_t TremorType;
-
-        uint8_t SlideUpSpd;
-        uint8_t SlideDnSpd;
-        uint8_t SlideSpd;
-        uint8_t VibratoPara;
-        uint8_t TremoloPara;
-        int8_t VolSlideSpd;
-        uint8_t FineProtaUp;
-        uint8_t FineProtaDn;
-        uint8_t FineVolUp;
-        uint8_t FineVolDn;
-        int8_t GlobalVolSlideSpd;
-        int8_t PanSlideSpd;
-        uint8_t RetrigPara;
-        uint8_t TremorPara;
-        uint8_t EFProtaUp;
-        uint8_t EFProtaDn;
-
-        int8_t TremorTick;
-        bool TremorMute;
-
-        uint8_t AutoVibPos;
-        uint8_t AutoVibSweep;
-        int8_t EnvFlags;
-
-        bool InstTrig;
-        bool LxxEffect;
-        bool Active;
-        bool Fading;
-        bool KeyOff;
-
-        //Current playing sample
-        bool Muted;
-        int8_t Loop;
-        int8_t LoopType;
-        bool Is16Bit;
-        int16_t Period;
-        int16_t TargetPeriod;
-        int16_t PeriodOfs;
-        int16_t StartCount;
-        int16_t EndCount;
-        int32_t SmpLeng;
-        int32_t LoopStart;
-        int32_t LoopEnd;
-        int32_t LoopLeng;
-        int32_t Delta;
-        float FacL;
-        float FacR;
-        int8_t *Data;
-        int8_t *DataPrev;
-        int32_t Pos;
-        int32_t PosL16;
-        int32_t VolTargetInst;
-        int32_t VolFinalInst;
-        int32_t VolTargetL;
-        int32_t VolTargetR;
-        int32_t VolFinalL;
-        int32_t VolFinalR;
-        int32_t VolRampSpdL;
-        int32_t VolRampSpdR;
-        int32_t VolRampSpdInst;
-        int32_t PrevSmp;
-        int32_t EndSmp;
-    };
-
-    struct Note
-    {
-        uint8_t Note;
-        uint8_t Instrument;
-        uint8_t VolCmd;
-        uint8_t Effect;
-        uint8_t Parameter;
-    };
-
-    struct EnvInfo
-    {
-        uint8_t Value;
-        int16_t MaxPoint;
-    };
-
-    static Channel *Channels;
-
-    #define Ch Channels[i]
-
-    static void RecalcAmp()
-    {
-        AmpFinal = Amp * 0.5;// /(MIN(3, MAX(1, NumOfChannels/10)))*.7;
-    }
-
-    static void UpdateTimer()
-    {
-        TimePerTick = 2.5 / Tempo;
-        SamplePerTick = TimePerTick / TimePerSample;
-    }
-
-    static void ResetChannels()
-    {
-        int i = 0;
-        while (i < NumOfChannels)
-        {
-            Ch.Note = 0;
-            Ch.RelNote = 0;
-            Ch.NoteArpeggio = 0;
-            Ch.LastNote = 0;
-            Ch.Pos = 0;
-            Ch.Delta = 0;
-            Ch.Period = 0;
-            Ch.TargetPeriod = 0;
-            Ch.FineTune = 0;
-            Ch.Loop = 0;
-
-            Ch.SmpPlaying = -1;
-            Ch.Sample = -1;
-            Ch.Instrument = 0;
-            Ch.NextInstrument = 0;
-            Ch.LastInstrument = 0;
-
-            Ch.VolCmd = 0;
-            Ch.Volume = 0;
-            Ch.LastVol = 0;
-            Ch.VolTargetInst = 0;
-            Ch.VolTargetL = 0;
-            Ch.VolTargetR = 0;
-            Ch.VolFinalL = 0;
-            Ch.VolFinalR = 0;
-            Ch.VolFinalInst = 0;
-            Ch.VolRampSpdL = 0;
-            Ch.VolRampSpdR = 0;
-            Ch.Pan = 128;
-            Ch.PanFinal = 128;
-
-            Ch.Effect = 0;
-            Ch.Parameter = 0;
-
-            Ch.VibratoPos = 0;
-            Ch.VibratoAmp = 0;
-            Ch.VibratoType = 0;
-            Ch.VolVibrato = false;
-            Ch.TremorPos = 0;
-            Ch.TremorAmp = 0;
-            Ch.TremorType = 0;
-
-            Ch.SlideUpSpd = 0;
-            Ch.SlideDnSpd = 0;
-            Ch.SlideSpd = 0;
-            Ch.VibratoPara = 0;
-            Ch.TremoloPara = 0;
-            Ch.VolSlideSpd = 0;
-            Ch.FineProtaUp = 0;
-            Ch.FineProtaDn = 0;
-            Ch.FineVolUp = 0;
-            Ch.FineVolDn = 0;
-            Ch.GlobalVolSlideSpd = 0;
-            Ch.PanSlideSpd = 0;
-            Ch.RetrigPara = 0;
-            Ch.EFProtaUp = 0;
-            Ch.EFProtaDn = 0;
-
-            Ch.Delay = 0;
-            Ch.RxxCounter = 0;
-            Ch.TremorTick = 0;
-            Ch.TremorMute = false;
-
-            Ch.StartCount = 0;
-            Ch.EndCount = SMP_CHANGE_RAMP;
-            Ch.PrevSmp = 0;
-            Ch.EndSmp = 0;
-
-            Ch.AutoVibPos = 0;
-            Ch.AutoVibSweep = 0;
-            Ch.VolEnvelope = 0;
-            Ch.PanEnvelope = 0;
-            Ch.EnvFlags = 0;
-
-            Ch.InstTrig = false;
-            Ch.Active = false;
-            Ch.Fading = false;
-            Ch.KeyOff = false;
-            Ch.FadeTick = 0;
-
-            Ch.Muted = false;
-
-            i ++ ;
-        }
-    }
-
-    static void ResetPatternEffects()
-    {
-        SampleToNextTick = 0;
-
-        GlobalVol = 64;
-
-        PatBreak = -1;
-        PatJump = -1;
-        PatDelay = 0;
-
-        PatRepeat = 0;
-        RepeatPos = 0;
-        RepeatTo = -1;
-    }
-
-    void ResetModule()
-    {
-
-        SDL_PauseAudioDevice(DeviceID, 0);
-        Playing = true;
-
-        Tempo = DefaultTempo;
-        Speed = DefaultSpd;
-        Tick = Speed - 1;
-
-        CurRow = -1;
-        CurPos = 0;
-
-        ResetPatternEffects();
-
-        RecalcAmp();
-
-        ResetChannels();
-
-        UpdateTimer();
-    }
-
-    bool LoadModule(uint8_t *SongDataOrig, uint32_t SongDataLeng, bool UsingInterpolation = true, bool UseStereo = true, bool LoopSong = true, int BufSize = BUFFER_SIZE, int SmpRate = SMP_RATE)
-    {
-        Loop = LoopSong;
-        Stereo = UseStereo;
-        Interpolation = UsingInterpolation;
-
-        PanMode = 0;
-        IgnoreF00 = true;
-
-        SamplingRate = SmpRate;
-        BufferSize = BufSize;
-
-        TimePerSample = 1.0/SamplingRate;
-
-        MasterVol = 255;
-
-        int i, j, k;
-        int32_t SongDataOfs = 17;
-
-        //Song data init
-        if (SongData != NULL) free(SongData);
-        SongData = (uint8_t *)malloc(SongDataLeng);
-        if (SongData == NULL) return false;
-
-        memcpy(SongData, SongDataOrig, SongDataLeng);
-
-        //Song name
-        i = 0;
-        while (i < 20)
-            SongName[i++] = SongData[SongDataOfs++];
-
-        //Tracker name & version
-        SongDataOfs = 38;
-        i = 0;
-        while (i < 20)
-            TrackerName[i++] = SongData[SongDataOfs++];
-
-        TrackerVersion = (((((uint16_t)SongData[SongDataOfs])<<8)&0xFF00) | SongData[SongDataOfs+1]);
-
-        SongDataOfs = 60;
-
-        //Song settings
-        int32_t HeaderSize = *(int32_t *)(SongData + SongDataOfs) + 60;
-        SongLength = *(int16_t *)(SongData + SongDataOfs + 4);
-        RstPos = *(int16_t *)(SongData + SongDataOfs + 6);
-        NumOfChannels = *(int16_t *)(SongData + SongDataOfs + 8);
-        NumOfPatterns = *(int16_t *)(SongData + SongDataOfs + 10);
-        NumOfInstruments = *(int16_t *)(SongData + SongDataOfs + 12);
-        AmigaFreqTable = !(SongData[SongDataOfs + 14] & 1);
-
-        DefaultSpd = *(int16_t *)(SongData + SongDataOfs + 16);
-        DefaultTempo = *(int16_t *)(SongData + SongDataOfs + 18);
-
-        if (Channels != NULL) free(Channels);
-        Channels = (Channel *)malloc(sizeof(Channel) * NumOfChannels);
-        if (Channels == NULL) return false;
-
-        //Pattern order table
-        SongDataOfs = 80;
-        i = 0;
-        while (i < SongLength)
-            OrderTable[i++] = SongData[SongDataOfs++];
-
-        //Pattern data size calc
-        memset(PatternAddr, 0, 256*4);
-        TotalPatSize = 0;
-
-        SongDataOfs = HeaderSize;
-        int32_t PatternOrig = SongDataOfs;
-        i = 0;
-        while (i < NumOfPatterns)
-        {
-            int32_t PatHeaderSize = *(int32_t *)(SongData + SongDataOfs);
-            int16_t PatternLeng = *(int16_t *)(SongData + SongDataOfs + 5);
-            int16_t PatternSize = *(int16_t *)(SongData + SongDataOfs + 7);
-
-            PatternAddr[i++] = TotalPatSize;
-
-            SongDataOfs += PatHeaderSize + PatternSize;
-
-            TotalPatSize += 2 + PatternLeng*ROW_SIZE_XM;
-        }
-
-        //Pattern data init
-        if (PatternData != NULL) free(PatternData);
-        PatternData = (uint8_t *)malloc(TotalPatSize);
-        if (PatternData == NULL) return false;
-        memset(PatternData, 0, TotalPatSize);
-
-        //Patter data
-        SongDataOfs = PatternOrig;
-        i = 0;
-        while (i < NumOfPatterns)
-        {
-            int32_t PatHeaderSize = *(int32_t *)(SongData + SongDataOfs);
-            int16_t PatternLeng = *(int16_t *)(SongData + SongDataOfs + 5);
-            int16_t PatternSize = *(int16_t *)(SongData + SongDataOfs + 7);
-
-            int32_t PDIndex = PatternAddr[i];
-            PatternData[PDIndex++] = PatternLeng & 0xFF;
-            PatternData[PDIndex++] = (int8_t)((PatternLeng >> 8) & 0xFF);
-
-            SongDataOfs += PatHeaderSize;
-
-            if (PatternSize > 0)
-            {
-                j = 0;
-                while (j < PatternLeng)
-                {
-                    k = 0;
-                    while (k < NumOfChannels)
-                    {
-                        int8_t SignByte = SongData[SongDataOfs++];
-
-                        PatternData[PDIndex] = 0;
-                        PatternData[PDIndex + 1] = 0;
-
-                        if (SignByte & 0x80)
-                        {
-                            if (SignByte & 0x01) PatternData[PDIndex] = SongData[SongDataOfs++];
-                            if (SignByte & 0x02) PatternData[PDIndex + 1] = SongData[SongDataOfs++];
-                            if (SignByte & 0x04) PatternData[PDIndex + 2] = SongData[SongDataOfs++];
-                            if (SignByte & 0x08) PatternData[PDIndex + 3] = SongData[SongDataOfs++];
-                            if (SignByte & 0x10) PatternData[PDIndex + 4] = SongData[SongDataOfs++];
-                        }
-                        else
-                        {
-                            PatternData[PDIndex] = SignByte;
-                            PatternData[PDIndex + 1] = SongData[SongDataOfs++];
-                            PatternData[PDIndex + 2] = SongData[SongDataOfs++];
-                            PatternData[PDIndex + 3] = SongData[SongDataOfs++];
-                            PatternData[PDIndex + 4] = SongData[SongDataOfs++];
-                        }
-                        PDIndex += 5;
-                        k ++ ;
-                    }
-                    j ++ ;
-                }
-            }
-            i ++ ;
-        }
-
-        //Instrument size calc
-        if (SampleStartIndex != NULL) free(SampleStartIndex);
-        SampleStartIndex = (int16_t *)malloc(NumOfInstruments*2);
-        if (SampleStartIndex == NULL) return false;
-
-        if (Instruments != NULL) free(Instruments);
-        Instruments = (Instrument *)malloc(NumOfInstruments*sizeof(Instrument));
-        if (Instruments == NULL) return false;
-
-        TotalInstSize = TotalSampleSize = TotalSampleNum = 0;
-        int InstOrig = SongDataOfs;
-        i = 0;
-        while (i < NumOfInstruments)
-        {
-            int32_t InstSize = *(int32_t *)(SongData + SongDataOfs);
-            int16_t InstSampleNum = *(int16_t *)(SongData + SongDataOfs + 27);
-            Instruments[i].SampleNum = InstSampleNum;
-
-            //Name
-            k = 0;
-            while (k < 22)
-            {
-                Instruments[i].Name[k] = SongData[SongDataOfs + 4 + k];
-                k ++ ;
-            }
-
-            if (InstSampleNum > 0)
-            {
-                //Note mapping
-                j = 0;
-                while (j < 96)
-                {
-                    Instruments[i].SampleMap[j] = TotalSampleNum + SongData[SongDataOfs + 33 + j];
-                    j ++ ;
-                }
-
-                //Vol envelopes
-                j = 0;
-                while (j < 24)
-                {
-                    Instruments[i].VolEnvelops[j] = *(int16_t *)(SongData + SongDataOfs + 129 + j*2);
-                    j ++ ;
-                }
-
-                //Pan envelopes
-                j = 0;
-                while (j < 24)
-                {
-                    Instruments[i].PanEnvelops[j] = *(int16_t *)(SongData + SongDataOfs + 177 + j*2);
-                    j ++ ;
-                }
-
-                Instruments[i].VolPoints = SongData[SongDataOfs + 225];
-                Instruments[i].PanPoints = SongData[SongDataOfs + 226];
-                Instruments[i].VolSustainPt = SongData[SongDataOfs + 227];
-                Instruments[i].VolLoopStart = SongData[SongDataOfs + 228];
-                Instruments[i].VolLoopEnd = SongData[SongDataOfs + 229];
-                Instruments[i].PanSustainPt = SongData[SongDataOfs + 230];
-                Instruments[i].PanLoopStart = SongData[SongDataOfs + 231];
-                Instruments[i].PanLoopEnd = SongData[SongDataOfs + 232];
-                Instruments[i].VolType = SongData[SongDataOfs + 233];
-                Instruments[i].PanType = SongData[SongDataOfs + 234];
-                Instruments[i].VibratoType = SongData[SongDataOfs + 235];
-                Instruments[i].VibratoSweep = SongData[SongDataOfs + 236];
-                Instruments[i].VibratoDepth = SongData[SongDataOfs + 237];
-                Instruments[i].VibratoRate = SongData[SongDataOfs + 238];
-                Instruments[i].FadeOut = *(int16_t *)(SongData + SongDataOfs + 239);
-
-                SongDataOfs += InstSize;
-
-                int32_t SubOfs = 0;
-                int32_t SampleDataOfs = 0;
-                j = 0;
-                while (j < InstSampleNum)
-                {
-                    SubOfs = j*40;
-                    int32_t SampleLeng = *(int32_t *)(SongData + SongDataOfs + SubOfs);
-                    int32_t LoopStart = *(int32_t *)(SongData + SongDataOfs + SubOfs + 4);
-                    int32_t LoopLeng = *(int32_t *)(SongData + SongDataOfs + SubOfs + 8);
-                    int8_t SampleType = SongData[SongDataOfs + SubOfs + 14] & 0x03;
-
-                    SampleDataOfs += SampleLeng;
-
-                    if (SampleType == 1)
-                        SampleLeng = LoopStart + LoopLeng;
-                    if ((SongData[SongDataOfs + SubOfs + 14] & 0x03) >= 2)
-                        SampleLeng = LoopStart + (LoopLeng + LoopLeng);
-
-                    TotalSampleSize += SampleLeng;
-                    j ++ ;
-                }
-                SongDataOfs += InstSampleNum*40 + SampleDataOfs;
-            }
-            else SongDataOfs += InstSize;
-
-            SampleStartIndex[i] = TotalSampleNum;
-            TotalSampleNum += InstSampleNum;
-
-            i ++ ;
-        }
-
-        //Sample convert
-        if (SampleHeaderAddr != NULL) free(SampleHeaderAddr);
-        SampleHeaderAddr = (int32_t *)malloc(TotalSampleNum*4);
-        if (SampleHeaderAddr == NULL) return false;
-
-
-        if (SampleData != NULL) free(SampleData);
-        SampleData = (int8_t *)malloc(TotalSampleSize);
-        if (SampleData == NULL) return false;
-
-        if (Samples != NULL) free(Samples);
-        Samples = (Sample *)malloc(TotalSampleNum*sizeof(Sample));
-        if (Samples == NULL) return false;
-
-        int16_t SampleNum = 0;
-        int32_t SampleWriteOfs = 0;
-        SongDataOfs = InstOrig;
-        i = 0;
-        while (i < NumOfInstruments)
-        {
-            int32_t InstSize = *(int32_t *)(SongData + SongDataOfs);
-            int16_t InstSampleNum = *(int16_t *)(SongData + SongDataOfs + 27);
-
-            SongDataOfs += InstSize;
-
-            if (InstSampleNum > 0)
-            {
-                int32_t SubOfs = 0;
-                int32_t SampleDataOfs = 0;
-                j = 0;
-                while (j < InstSampleNum)
-                {
-                    SampleNum = SampleStartIndex[i] + j;
-                    SubOfs = j*40;
-                    SampleHeaderAddr[SampleNum] = SongDataOfs + SubOfs;
-                    int32_t SampleLeng = *(int32_t *)(SongData + SongDataOfs + SubOfs);
-                    int32_t LoopStart = *(int32_t *)(SongData + SongDataOfs + SubOfs + 4);
-                    int32_t LoopLeng = *(int32_t *)(SongData + SongDataOfs + SubOfs + 8);
-                    int8_t SampleType = SongData[SongDataOfs + SubOfs + 14];
-                    bool Is16Bit = (SampleType & 0x10);
-
-                    int16_t SampleNum = SampleStartIndex[i] + j;
-
-                    Samples[SampleNum].OrigInst = i + 1;
-                    Samples[SampleNum].Type = SampleType & 0x03;
-                    Samples[SampleNum].Is16Bit = Is16Bit;
-
-                    Samples[SampleNum].Volume = SongData[SongDataOfs + SubOfs + 12];
-                    Samples[SampleNum].Pan = SongData[SongDataOfs + SubOfs + 15];
-                    Samples[SampleNum].FineTune = *(int8_t *)(SongData + SongDataOfs + SubOfs + 13);
-                    Samples[SampleNum].RelNote = *(int8_t *)(SongData + SongDataOfs + SubOfs + 16);
-
-                    k = 0;
-                    while (k < 22)
-                    {
-                        Samples[SampleNum].Name[k] = SongData[SongDataOfs + SubOfs + 18 + k];
-                        k ++ ;
-                    }
-
-                    Samples[SampleNum].Data = SampleData + SampleWriteOfs;
-                    SubOfs = 40*InstSampleNum + SampleDataOfs;
-                    SampleDataOfs += SampleLeng;
-
-                    if (Is16Bit)
-                    {
-                        Samples[SampleNum].Length = SampleLeng >> 1;
-                        Samples[SampleNum].LoopStart = LoopStart >> 1;
-                        Samples[SampleNum].LoopLength = LoopLeng >> 1;
-                    }
-                    else
-                    {
-                        Samples[SampleNum].Length = SampleLeng;
-                        Samples[SampleNum].LoopStart = LoopStart;
-                        Samples[SampleNum].LoopLength = LoopLeng;
-                    }
-
-                    int32_t ReversePoint = -1;
-                    if (Samples[SampleNum].Type == 1)
-                        SampleLeng = LoopStart + LoopLeng;
-                    else if (Samples[SampleNum].Type >= 2)
-                    {
-                        ReversePoint = LoopStart + LoopLeng;
-                        SampleLeng = ReversePoint + LoopLeng;
-                    }
-
-                    bool Reverse = false;
-                    int32_t ReadOfs = 0;
-                    int16_t Old = 0;
-                    k = 0;
-                    if (Is16Bit)
-                    {
-                        int16_t New;
-                        SampleLeng >>= 1;
-                        ReversePoint >>= 1;
-                        while (k < SampleLeng)
-                        {
-                            //int16_t New = (int16_t)SONGSEEK16(SongDataOfs + SubOfs, SongData) + Old;
-                            if (k == ReversePoint)
-                            {
-                                Reverse = true;
-                                ReadOfs -= 2;
-                            }
-                            if (Reverse)
-                            {
-                                New = -*(int16_t *)(SongData + SongDataOfs + SubOfs + ReadOfs) + Old;
-                                ReadOfs -= 2;
-                            }
-                            else
-                            {
-                                New = *(int16_t *)(SongData + SongDataOfs + SubOfs + ReadOfs) + Old;
-                                ReadOfs += 2;
-                            }
-                            *(int16_t *)(SampleData + SampleWriteOfs) = New;
-                            SampleWriteOfs += 2;
-
-                            Old = New;
-                            k ++ ;
-                        }
-                    }
-                    else
-                    {
-                        int8_t New;
-                        while (k < SampleLeng)
-                        {
-                            if (k == ReversePoint)
-                            {
-                                Reverse = true;
-                                ReadOfs -- ;
-                            }
-                            if (Reverse)
-                            {
-                                New = -SongData[SongDataOfs + SubOfs + ReadOfs] + Old;
-                                ReadOfs -- ;
-                            }
-                            else
-                            {
-                                New = SongData[SongDataOfs + SubOfs + ReadOfs] + Old;
-                                ReadOfs ++ ;
-                            }
-                            SampleData[SampleWriteOfs++] = New;
-
-                            Old = New;
-                            k ++ ;
-                        }
-                    }
-
-                    j ++ ;
-                    //SampleNum ++ ;
-                }
-                SongDataOfs += 40*InstSampleNum + SampleDataOfs;
-            }
-            i ++ ;
-        }
-
-        if (SampleHeaderAddr != NULL) free(SampleHeaderAddr);
-        if (SampleStartIndex != NULL) free(SampleStartIndex);
-
-        if (SongData != NULL) free(SongData);
-
-        ResetModule();
-        SongLoaded = true;
-
-        return true;
-    }
-
-    static Note GetNote(uint8_t PatNum, uint8_t Row, uint8_t Col)
-    {
-        Note ThisNote = *(Note *)(PatternData + PatternAddr[PatNum] + ROW_SIZE_XM*Row + Col*NOTE_SIZE_XM + 2);
-
-        return ThisNote;
-    }
-
-    static EnvInfo CalcEnvelope(Instrument Inst, int16_t Pos, bool CalcPan)
-    {
-        EnvInfo RetInfo;
-
-        if (Inst.SampleNum > 0)
-        {
-            int16_t *EnvData = CalcPan ? Inst.PanEnvelops : Inst.VolEnvelops;
-            int8_t NumOfPoints = CalcPan ? Inst.PanPoints : Inst.VolPoints;
-            RetInfo.MaxPoint = EnvData[(NumOfPoints - 1)*2];
-
-            if (Pos == 0)
-            {
-                RetInfo.Value = EnvData[1];
-                return RetInfo;
-            }
-
-            int i = 0;
-            while (i < NumOfPoints - 1)
-            {
-                if (Pos < EnvData[i*2 + 2])
-                {
-                    int16_t PrevPos = EnvData[i*2];
-                    int16_t NextPos = EnvData[i*2 + 2];
-                    int16_t PrevValue = EnvData[i*2 + 1];
-                    int16_t NextValue = EnvData[i*2 + 3];
-                    RetInfo.Value = (int8_t)((NextValue - PrevValue)*(Pos - PrevPos)/(NextPos - PrevPos) + PrevValue);
-                    return RetInfo;
-                }
-                i ++ ;
-            }
-
-            RetInfo.Value = EnvData[(NumOfPoints - 1)*2 + 1];
-            return RetInfo;
-        }
-        else
-        {
-            RetInfo.Value = 0;
-            RetInfo.MaxPoint = 0;
-        }
-
-        return RetInfo;
-    }
-
-    #define PI 3.1415926535897932384626433832795
-
-    static void CalcPeriod(uint8_t i)
-    {
-        int16_t RealNote = (Ch.NoteArpeggio <= 119 && Ch.NoteArpeggio > 0 ? Ch.NoteArpeggio : Ch.Note) + Ch.RelNote - 1;
-        int8_t FineTune = Ch.FineTune;
-        int16_t Period;
-        if (!AmigaFreqTable)
-            Period = 7680 - RealNote*64 - FineTune/2;
-        else
-        {
-            //https://github.com/dodocloud/xmplayer/blob/master/src/xmlib/engine/utils.ts
-            //function calcPeriod
-            double FineTuneFrac = floor((double)FineTune / 16.0);
-            uint16_t Period1 = PeriodTab[8 + (RealNote % 12)*8 + (int16_t)FineTuneFrac];
-            uint16_t Period2 = PeriodTab[8 + (RealNote % 12)*8 + (int16_t)FineTuneFrac + 1];
-            FineTuneFrac = ((double)FineTune / 16.0) - FineTuneFrac;
-            Period = (int16_t)round((1.0 - FineTuneFrac)*Period1 + FineTuneFrac*Period2) * (16.0 / pow(2, floor(RealNote / 12) - 1));
-        }
-
-        Ch.Period = MAX(Ch.Period, 50);
-        Period = MAX(Period, 50);
-
-        if (Ch.NoteArpeggio <= 119 && Ch.NoteArpeggio > 0)
-            Ch.Period = Period;
-        else
-            Ch.TargetPeriod = Period;
-    }
-
-    static void UpdateChannelInfo()
-    {
-        int i = 0;
-        while (i < NumOfChannels)
-        {
-            if (Ch.Active && Ch.SmpPlaying != -1)
-            {
-                //Arpeggio
-                if (Ch.Parameter != 0 && Ch.Effect == 0)
-                {
-                    int8_t ArpNote1 = Ch.Parameter >> 4;
-                    int8_t ArpNote2 = Ch.Parameter & 0xF;
-                    int8_t Arpeggio[3] = {0, ArpNote2, ArpNote1};
-                    if (AmigaFreqTable) Ch.NoteArpeggio = Ch.Note + Arpeggio[Tick%3];
-                    else Ch.PeriodOfs = -Arpeggio[Tick%3] * 64;
-                    //Ch.Period = Ch.TargetPeriod;
-                }
-
-                //Auto vibrato
-                int32_t AutoVibFinal = 0;
-                if (Ch.SmpPlaying != -1)
-                {
-                    Instrument SmpOrigInst = Instruments[Samples[Ch.SmpPlaying].OrigInst - 1];
-
-                    if (SmpOrigInst.SampleNum > 0)
-                    {
-                        Ch.AutoVibPos += SmpOrigInst.VibratoRate;
-                        if (Ch.AutoVibSweep < SmpOrigInst.VibratoSweep) Ch.AutoVibSweep ++ ;
-
-                        if (SmpOrigInst.VibratoRate)
-                        {
-                            //https://github.com/milkytracker/MilkyTracker/blob/master/src/milkyplay/PlayerSTD.cpp
-                            //Line 568 - 599
-                            uint8_t VibPos = Ch.AutoVibPos >> 2;
-                            uint8_t VibDepth = SmpOrigInst.VibratoDepth;
-
-                            int32_t Value = 0;
-                            switch (SmpOrigInst.VibratoType) {
-                                // sine (we must invert the phase here)
-                                case 0:
-                                    Value = ~VibTab[VibPos&31];
-                                    break;
-                                // square
-                                case 1:
-                                    Value = 255;
-                                    break;
-                                // ramp down (down being the period here - so ramp frequency up ;)
-                                case 2:
-                                    Value = ((VibPos & 31) *539087) >> 16;
-                                    if ((VibPos & 63) > 31) Value = 255 - Value;
-                                    break;
-                                // ramp up (up being the period here - so ramp frequency down ;)
-                                case 3:
-                                    Value = ((VibPos & 31) * 539087) >> 16;
-                                    if ((VibPos & 63) > 31) Value = 255 - Value;
-                                    Value = -Value;
-                                    break;
-                            }
-
-                            AutoVibFinal = ((Value * VibDepth) >> 1);
-                            if (SmpOrigInst.VibratoSweep) {
-                                AutoVibFinal *= ((int32_t)Ch.AutoVibSweep << 8) / SmpOrigInst.VibratoSweep;
-                                AutoVibFinal >>= 8;
-                            }
-
-                            if ((VibPos & 63) > 31) AutoVibFinal = -AutoVibFinal;
-
-                            AutoVibFinal >>= 7;
-                        }
-                    }
-                }
-
-                //Delta calculation
-                CalcPeriod(i);
-                double Freq;
-                double RealPeriod = MAX(Ch.Period + Ch.PeriodOfs, 50) + Ch.VibratoAmp*sin((Ch.VibratoPos & 0x3F)*PI/32)*8 + AutoVibFinal;
-                if (!AmigaFreqTable)
-                    Freq = 8363*pow(2, (4608 - RealPeriod)/768);
-                else Freq = 8363.0*1712/RealPeriod;
-
-                Ch.Delta = (uint32_t)(Freq/SamplingRate*TOINT_SCL);
-
-                Instrument Inst = Instruments[Ch.Instrument - 1];
-
-                //Volume
-                Ch.Volume = MAX(MIN(Ch.Volume, 64), 0);
-                int16_t RealVol = Ch.TremorMute ? 0 : (int8_t)MAX(MIN(Ch.Volume + Ch.TremorAmp*sin((Ch.TremorPos & 0x3F)*PI/32)*4, 64), 0);
-                int16_t VolTarget = RealVol*GlobalVol/64;
-                if (Inst.VolType & 0x01)
-                {
-                    EnvInfo VolEnv = CalcEnvelope(Inst, Ch.VolEnvelope, false);
-
-                    if (Inst.VolType & 0x02)
-                    {
-                        if (Ch.VolEnvelope != Inst.VolEnvelops[Inst.VolSustainPt*2] || Ch.Fading)
-                            Ch.VolEnvelope ++ ;
-                    }
-                    else Ch.VolEnvelope ++ ;
-
-                    if (Inst.VolType & 0x04)
-                    {
-                        if (Ch.VolEnvelope >= Inst.VolEnvelops[Inst.VolLoopEnd*2])
-                            Ch.VolEnvelope = Inst.VolEnvelops[Inst.VolLoopStart*2];
-                    }
-
-                    if (Ch.VolEnvelope >= VolEnv.MaxPoint)
-                        Ch.VolEnvelope = VolEnv.MaxPoint;
-
-                    int16_t InstFadeout = Inst.FadeOut;
-                    int32_t FadeOutVol;
-                    if (Ch.Fading && InstFadeout > 0)
-                    {
-                        int16_t FadeOutLeng = 32768 / InstFadeout;
-                        if (Ch.FadeTick < FadeOutLeng) Ch.FadeTick ++ ;
-                        else Ch.Active = false;
-                        FadeOutVol = 64*(FadeOutLeng - Ch.FadeTick)/FadeOutLeng;
-                    }
-                    else FadeOutVol = 64;
-
-                    Ch.VolTargetInst = VolEnv.Value;
-                    //Ch.VolTarget = FadeOutVol*GlobalVol/64*RealVol/64;
-                    //Ch.VolTarget = FadeOutVol*VolEnv.Value/64*GlobalVol/64*RealVol/64;
-                    VolTarget = FadeOutVol*GlobalVol/64*RealVol/64;
-                }
-                else
-                {
-                    Ch.VolTargetInst = 64;
-                    if (Ch.Fading) Ch.Volume = 0;
-                }
-                Ch.VolTargetInst <<= INT_ACC_RAMPING;
-
-                VolTarget = MAX(MIN(VolTarget, 64), 0);
-
-                //Panning
-                Ch.Pan = MAX(MIN(Ch.Pan, 255), 0);
-                if (Inst.PanType & 0x01)
-                {
-                    EnvInfo PanEnv = CalcEnvelope(Inst, Ch.PanEnvelope, true);
-                    if (Inst.PanType & 0x02)
-                    {
-                        if (Ch.PanEnvelope != Inst.PanEnvelops[Inst.PanSustainPt*2] || Ch.Fading)
-                            Ch.PanEnvelope ++ ;
-                    }
-                    else Ch.PanEnvelope ++ ;
-
-                    if (Inst.PanType & 0x04)
-                    {
-                        if (Ch.PanEnvelope >= Inst.PanEnvelops[Inst.PanLoopEnd*2])
-                            Ch.PanEnvelope = Inst.PanEnvelops[Inst.PanLoopStart*2];
-                    }
-
-                    if (Ch.PanEnvelope >= PanEnv.MaxPoint)
-                        Ch.PanEnvelope = PanEnv.MaxPoint;
-
-                    Ch.PanFinal = Ch.Pan + (((PanEnv.Value - 32) * (128 - abs(Ch.Pan - 128))) >> 5);
-                }
-                else Ch.PanFinal = Ch.Pan;
-                Ch.PanFinal = MAX(MIN(Ch.PanFinal, 255), 0);
-
-                //Sample info
-                Sample CurSample = Samples[Ch.SmpPlaying];
-                Ch.Data = CurSample.Data;
-                Ch.LoopType = CurSample.Type;
-
-                Ch.Is16Bit = CurSample.Is16Bit;
-                Ch.SmpLeng = CurSample.Length;
-                Ch.LoopStart = CurSample.LoopStart;
-                Ch.LoopLeng = CurSample.LoopLength;
-                Ch.LoopEnd = Ch.LoopStart + Ch.LoopLeng;
-
-                if (Ch.LoopType >= 2)
-                {
-                    Ch.LoopEnd += Ch.LoopLeng;
-                    Ch.LoopLeng <<= 1;
-                }
-                if (!Ch.LoopType) Ch.Loop = 0;
-
-                //Set volume ramping
-                double VolRampSmps = SamplePerTick;
-                double InstVolRampSmps = SamplePerTick;
-                if (Ch.LxxEffect)
-                {
-                    InstVolRampSmps = VOLRAMP_NEW_INSTR;
-                    Ch.LxxEffect = false;
-                }
-
-                if (((Ch.VolCmd & 0xF0) >= 0x10 &&
-                    (Ch.VolCmd & 0xF0) <= 0x50) ||
-                    (Ch.VolCmd & 0xF0) == 0xC0 ||
-                     Ch.Effect == 12 || Ch.Effect == 8 ||
-                    (Ch.Effect == 0x14 && (Ch.Parameter & 0xF0) == 0xC0))
-                    VolRampSmps = VOLRAMP_VOLSET_SAMPLES;
-
-                if (!(Inst.VolType & 0x01) && Ch.Fading)
-                {
-                    VolTarget = 0;
-                    Ch.Fading = false;
-                    VolRampSmps = VOLRAMP_VOLSET_SAMPLES;
-                }
-
-                if (Ch.InstTrig)
-                {
-                    //Ch.VolFinal = Ch.VolTarget;
-                    //Ch.VolFinalInst = Ch.VolTargetInst;
-
-                    VolRampSmps = VOLRAMP_VOLSET_SAMPLES;
-                    InstVolRampSmps = VOLRAMP_NEW_INSTR;
-
-                    //Ch.VolFinalL = Ch.VolFinalR = 0;
-                    Ch.InstTrig = false;
-                }
-                //else if (Ch.Effect == 0xA)
-                //    VolRampSmps = SamplePerTick;
-
-                if (Stereo)
-                {
-                    if (!PanMode)
-                    {
-                        //https://modarchive.org/forums/index.php?topic=3517.0
-                        //FT2 square root panning law
-                        Ch.VolTargetL = (int32_t)(VolTarget * sqrt((256 - Ch.PanFinal) / 256.0) / .707) << INT_ACC_RAMPING;
-                        Ch.VolTargetR = (int32_t)(VolTarget * sqrt(Ch.PanFinal / 256.0) / .707) << INT_ACC_RAMPING;
-                    }
-                    else
-                    {
-                        //Linear panning
-                        if (Ch.PanFinal > 128)
-                        {
-                            Ch.VolTargetL = VolTarget * (256 - Ch.PanFinal) / 128.0;
-                            Ch.VolTargetR = VolTarget;
-                        }
-                        else
-                        {
-                            Ch.VolTargetL = VolTarget;
-                            Ch.VolTargetR = VolTarget * (Ch.PanFinal / 128.0);
-                        }
-                        Ch.VolTargetL <<= INT_ACC_RAMPING;
-                        Ch.VolTargetR <<= INT_ACC_RAMPING;
-                    }
-                }
-                else Ch.VolTargetL = Ch.VolTargetR = (VolTarget << INT_ACC_RAMPING);
-
-                Ch.VolRampSpdL = (Ch.VolTargetL - Ch.VolFinalL) / VolRampSmps;
-                Ch.VolRampSpdR = (Ch.VolTargetR - Ch.VolFinalR) / VolRampSmps;
-                Ch.VolRampSpdInst = (Ch.VolTargetInst - Ch.VolFinalInst) / InstVolRampSmps;
-
-                if (Ch.VolRampSpdL == 0) Ch.VolFinalL = Ch.VolTargetL;
-                if (Ch.VolRampSpdR == 0) Ch.VolFinalR = Ch.VolTargetR;
-                if (Ch.VolRampSpdInst == 0) Ch.VolFinalInst = Ch.VolTargetInst;
-            }
-            else Ch.VolFinalL = Ch.VolFinalR = 0;
-            i ++ ;
-        }
-    }
-
-    static void ChkEffectRow(Note ThisNote, uint8_t i, bool ByPassEffectCol, bool RxxRetrig = false)
-    {
-        uint8_t VolCmd = ThisNote.VolCmd;
-        uint8_t VolPara = ThisNote.VolCmd & 0x0F;
-        uint8_t Effect = ThisNote.Effect;
-        uint8_t Para = ThisNote.Parameter;
-        uint8_t SubEffect = Para & 0xF0;
-        uint8_t SubPara = Para & 0x0F;
-
-        //if ((Effect != 0) || (Para == 0))   //0XX
-        //    Ch.NoteOfs = 0;
-
-        if (ByPassEffectCol) goto VolCol;
-
-        //Effect column
-        switch (Effect)
-        {
-            default:
-                break;
-            case 1: //1xx
-                if (Para != 0) Ch.SlideUpSpd = Para;
-                break;
-            case 2: //2xx
-                if (Para != 0) Ch.SlideDnSpd = Para;
-                break;
-            case 3: //3xx
-                if (Para != 0) Ch.SlideSpd = Para;
-                break;
-            case 4: //4xx
-                if ((Para & 0xF) > 0)
-                    Ch.VibratoPara = (Ch.VibratoPara&0xF0) + (Para&0xF);
-                if (((Para >> 4) & 0xF) > 0)
-                    Ch.VibratoPara = (Ch.VibratoPara&0xF) + (Para&0xF0);
-                break;
-            case 7: //7xx
-                if ((Para & 0xF) > 0)
-                    Ch.TremoloPara = (Ch.TremoloPara&0xF0) + (Para&0xF);
-                if (((Para >> 4) & 0xF) > 0)
-                    Ch.TremoloPara = (Ch.TremoloPara&0xF) + (Para&0xF0);
-                break;
-            case 8: //8xx
-                Ch.Pan = Para;
-                break;
-            //case 9: //9xx
-            //    //if (Ch.Active) Ch.Pos = Para*256;
-            //    if (ThisNote.Note < 97) Ch.Pos = Para*256;
-            //    break;
-            case 5: //5xx
-            case 6: //6xx
-            case 10:    //Axx
-                if (Para != 0)
-                {
-                    if (Para & 0xF) Ch.VolSlideSpd = -(Para & 0xF);
-                    else if (Para & 0xF0) Ch.VolSlideSpd = (Para >> 4) & 0xF;
-                }
-                break;
-            case 11:    //Bxx
-                PatJump = Para;
-                break;
-            case 12:    //Cxx
-                Ch.Volume = Para;
-                break;
-            case 13:    //Dxx
-                PatBreak = (Para >> 4)*10 + (Para & 0xF);
-                break;
-            case 14:    //Exx
-                switch (SubEffect)
-                {
-                    case 0x10:  //E1x
-                        if (SubPara != 0) Ch.FineProtaUp = SubPara;
-                        if (Ch.Period > 1) Ch.Period -= Ch.FineProtaUp * 4;
-                        break;
-                    case 0x20:  //E2x
-                        if (SubPara != 0) Ch.FineProtaDn = SubPara;
-                        if (Ch.Period < 7680) Ch.Period += Ch.FineProtaDn * 4;
-                        break;
-                    case 0x30:  //E3x
-                        break;
-                    case 0x40:  //E4x
-                        break;
-                    case 0x50:  //E5x
-                        Ch.FineTune = FineTuneTable[(AmigaFreqTable ? 0 : 16) + SubPara];
-                        break;
-                    case 0x60:  //E6x
-                        if (SubPara == 0 && RepeatPos < CurRow) {
-                            RepeatPos = CurRow;
-                            PatRepeat = 0;
-                        } else if (PatRepeat < SubPara) {
-                            PatRepeat ++ ;
-                            RepeatTo = RepeatPos;
-                        }
-                        break;
-                    case 0x70:  //E7x
-                        break;
-                    case 0x80:  //E8x
-                        break;
-                    case 0xA0:  //EAx
-                        if (SubPara != 0) Ch.FineVolUp = SubPara;
-                        Ch.Volume += Ch.FineVolUp;
-                        break;
-                    case 0xB0:  //EBx
-                        if (SubPara != 0) Ch.FineVolDn = SubPara;
-                        Ch.Volume -= Ch.FineVolDn;
-                        break;
-                    case 0x90:  //E9x
-                    case 0xC0:  //ECx
-                        Ch.Delay = SubPara - 1;
-                        break;
-                    case 0xD0:  //EDx
-                        Ch.Delay = SubPara;
-                        break;
-                    case 0xE0:
-                        PatDelay = SubPara;
-                        break;
-                }
-                break;
-            case 15:    //Fxx
-                if (!IgnoreF00)
-                {
-                    if (Para < 32 && Para != 0) Speed = Para;
-                    else Tempo = Para;
-                }
-                else if (Para != 0)
-                {
-                    if (Para < 32) Speed = Para;
-                    else Tempo = Para;
-                }
-                break;
-            case 16:    //Gxx
-                GlobalVol = MAX(MIN(Para, 64), 0);
-                break;
-            case 17:    //Hxx
-                if (Para != 0)
-                {
-                    if (Para & 0xF) Ch.GlobalVolSlideSpd = -(Para & 0xF);
-                    else if (Para & 0xF0) Ch.GlobalVolSlideSpd = (Para >> 4) & 0xF;
-                }
-                break;
-            case 20:    //Kxx
-                if (Para == 0) Ch.KeyOff = Ch.Fading = true;
-                else Ch.Delay = Para;
-                break;
-            case 21:    //Lxx
-                if (Ch.Instrument && Ch.Instrument <= NumOfInstruments)
-                {
-                    if (Instruments[Ch.Instrument - 1].VolType & 0x02)
-                        Ch.PanEnvelope = Para;
-
-                    Ch.VolEnvelope = Para;
-                    Ch.LxxEffect = true;
-                    Ch.Active = true;
-                }
-                break;
-            case 25:    //Pxx
-                if (Para != 0)
-                {
-                    if (Para & 0xF) Ch.PanSlideSpd = -(Para & 0xF);
-                    else if (Para & 0xF0) Ch.PanSlideSpd = (Para >> 4) & 0xF;
-                }
-                break;
-            case 27:    //Rxx
-                //Ch.RxxCounter = 1;
-                //Ch.Delay = SubPara;
-                //if ((Para & 0xF0) != 0) Ch.RetrigPara = (Para >> 4) & 0xF;
-                if (((Para >> 4) & 0xF) > 0)
-                    Ch.RetrigPara = (Ch.RetrigPara&0xF) + (Para&0xF0);
-                /*
-                if ((Ch.RetrigPara < 6) || (Ch.RetrigPara > 7 && Ch.RetrigPara < 14))
-                    Ch.Volume += RxxVolSlideTable[Ch.RetrigPara];
-                else
-                {
-                    switch (Ch.RetrigPara)
-                    {
-                        case 6:
-                            Ch.Volume = (Ch.Volume << 1) / 3;
-                            break;
-                        case 7:
-                            Ch.Volume >>= 1;
-                            break;
-                        case 14:
-                            Ch.Volume = (Ch.Volume * 3) >> 1;
-                            break;
-                        case 15:
-                            Ch.Volume <<= 1;
-                            break;
-                    }
-                }
-                */
-                break;
-            case 29:    //Txx
-                if (Para != 0) Ch.TremorPara = Para;
-                break;
-            case 33:    //Xxx
-                if (SubEffect == 0x10)  //X1x
-                {
-                    if (SubPara != 0) Ch.EFProtaUp = SubPara;
-                    Ch.Period -= Ch.EFProtaUp;
-                }
-                else if (SubEffect == 0x20) //X2x
-                {
-                    if (SubPara != 0) Ch.EFProtaDn = SubPara;
-                    Ch.Period += Ch.EFProtaDn;
-                }
-                break;
-        }
-
-        VolCol:
-        //Volume column effects
-        switch (VolCmd & 0xF0)
-        {
-            case 0x80:  //Dx
-                Ch.Volume -= VolPara;
-                break;
-            case 0x90:  //Ux
-                Ch.Volume += VolPara;
-                break;
-            case 0xA0:  //Sx
-                Ch.VibratoPara = (Ch.VibratoPara&0xF) + ((VolPara << 4) & 0xF0);
-                break;
-            case 0xB0:  //Vx
-                if (VolPara != 0)
-                    Ch.VibratoPara = (Ch.VibratoPara&0xF0) + VolPara;
-                break;
-            case 0xC0:  //Px
-                Ch.Pan = VolPara * 17;
-                break;
-            case 0xF0:  //Mx
-                if (VolPara != 0) Ch.SlideSpd = ((VolPara << 4) & 0xF0) + VolPara;
-                break;
-            default:    //Vxx
-                if (VolCmd >= 0x10 && VolCmd <= 0x50 && !RxxRetrig)
-                    Ch.LastVol = Ch.Volume = VolCmd - 0x10;
-                break;
-        }
-    }
-
-    static void ChkNote(Note ThisNote, uint8_t i, bool ByPassDelayChk, bool RxxRetrig = false)
-    {
-        /*
-        Note ThisNote;
-        ThisNote.Note = Ch.LastNote;
-        ThisNote.Instrument = Ch.LastInstrument;
-        ThisNote.VolCmd = Ch.VolCmd | Ch.VolPara;
-        ThisNote.Effect = Ch.Effect;
-        ThisNote.Parameter = Ch.Parameter;
-        */
-
-        //uint8_t Note = ThisNote.Note;
-        //if (ThisNote.Note > 96 || ThisNote.Note == 0) Note = Ch.Note;
-        //Ch.Note = Note;
-
-        Note ThisNoteOrig = ThisNote;
-        if (ByPassDelayChk)
-        {
-            ThisNote.Note = Ch.LastNote;
-            ThisNote.Instrument = Ch.LastInstrument;
-            ThisNote.VolCmd = Ch.VolCmd;
-            ThisNote.Effect = Ch.Effect;
-            ThisNote.Parameter = Ch.Parameter;
-        }
-
-        if ((Ch.NoteArpeggio <= 119 && Ch.NoteArpeggio > 0) || Ch.PeriodOfs != 0/*&& (Ch.Effect != 0 || Ch.Parameter == 0)*/)
-        {
-            Ch.PeriodOfs = 0;
-            Ch.NoteArpeggio = 0;
-            if (AmigaFreqTable)
-                Ch.Period = Ch.TargetPeriod;
-        }
-
-        bool Porta = (ThisNote.Effect == 3 || ThisNote.Effect == 5 || ((ThisNote.VolCmd & 0xF0) == 0xF0));
-
-        bool HasNoteDelay = (ThisNote.Effect == 14 && ((ThisNote.Parameter&0xF0) >> 4) == 13 && (ThisNote.Parameter & 0x0F) != 0);
-
-        if (ThisNote.Effect != 4 && ThisNote.Effect != 6 && !Ch.VolVibrato) Ch.VibratoPos = 0;
-
-        if (!HasNoteDelay || ByPassDelayChk)
-        {
-            //Reference: https://github.com/milkytracker/MilkyTracker/blob/master/src/milkyplay/PlayerSTD.cpp - PlayerSTD::progressRow()
-
-            Ch.Delay = -1;
-
-            int8_t NoteNum = ThisNote.Note;
-            uint8_t InstNum = ThisNote.Instrument;
-            //bool ValidNote = true;
-
-            //if (InstNum && InstNum <= NumOfInstruments)
-            //{
-            //    Ch.Instrument = InstNum;
-            //}
-
-            uint8_t OldInst = Ch.Instrument;
-            int16_t OldSamp = Ch.Sample;
-
-            bool InvalidInstr = true;
-            if (InstNum && InstNum <= NumOfInstruments && NoteNum < 97)
-            {
-                if (Instruments[InstNum - 1].SampleNum > 0)
-                {
-                    Ch.NextInstrument = InstNum;
-                    InvalidInstr = false;
-                }
-            }
-
-            if (InstNum && InvalidInstr) Ch.NextInstrument = 255;
-
-            bool ValidNote = true;
-            bool TrigByNote = false;
-            if (NoteNum && NoteNum <97)
-            {
-                /*
-                if (InstNum && InstNum <= NumOfInstruments)
-                {
-                    Ch.Instrument = InstNum;
-                }
-                else InstNum = 0;
-
-                bool InvalidInstr = true;
-                if (Ch.Instrument && Ch.Instrument <= NumOfInstruments)
-                {
-                    if (Instruments[Ch.Instrument - 1].SampleNum > 0)
-                        InvalidInstr = false;
-                }
-                */
-
-                if (Ch.NextInstrument == 255)
-                {
-                    InstNum = 0;
-                    Ch.Active = false;
-                    Ch.Volume = 0;
-                    Ch.Sample = -1;
-                    Ch.Instrument = 0;
-                }
-                else Ch.Instrument = Ch.NextInstrument;
-
-                if (Ch.NextInstrument && Ch.NextInstrument <= NumOfInstruments)
-                {
-                    Ch.Sample = Instruments[Ch.NextInstrument - 1].SampleMap[NoteNum - 1];
-
-                    if (Ch.Sample != -1 && !Porta)
-                    {
-                        Sample Smp = Samples[Ch.Sample];
-                        int8_t RelNote = Smp.RelNote;
-                        int8_t FinalNote = NoteNum + RelNote;
-
-                        if (FinalNote >= 1 && FinalNote <= 119)
-                        {
-                            Ch.FineTune = Smp.FineTune;
-                            Ch.RelNote = RelNote;
-                        }
-                        else
-                        {
-                            NoteNum = Ch.Note;
-                            ValidNote = false;
-                        }
-                    }
-
-                    if (ValidNote)
-                    {
-                        Ch.Note = NoteNum;
-
-                        CalcPeriod(i);
-
-                        if (!Porta)
-                        {
-                            Ch.Period = Ch.TargetPeriod;
-                            Ch.SmpPlaying = Ch.Sample;
-                            Ch.AutoVibPos = Ch.AutoVibSweep = 0;
-                            Ch.Loop = 0;
-
-                            Ch.StartCount = 0;
-
-                            if (ThisNote.Effect == 9) Ch.Pos = ThisNote.Parameter << 8;
-                            else Ch.Pos = 0;
-
-                            if (Ch.Pos > Samples[Ch.SmpPlaying].Length) Ch.Pos = Samples[Ch.SmpPlaying].Length;
-
-                            //NoteTrig = true;
-                            if (!Ch.Active && !InstNum)
-                            {
-                                TrigByNote = true;
-                                goto TrigInst;
-                            }
-                        }
-                    }
-                }
-            }
-
-            //FT2 bug emulation
-            if ((Porta || !ValidNote) && InstNum)
-            {
-                InstNum = Ch.Instrument = OldInst;
-                Ch.Sample = OldSamp;
-            }
-
-            if (InstNum && Ch.Sample != -1)
-            {
-                TrigInst:
-                if (!RxxRetrig && ThisNoteOrig.Instrument)
-                {
-                    //Ch.VolFinalL = Ch.VolFinalR = 0;
-                    Ch.Volume = TrigByNote ? Ch.LastVol : Ch.LastVol = Samples[Ch.SmpPlaying].Volume;
-                    Ch.Pan = Samples[Ch.SmpPlaying].Pan;
-                    Ch.TremorMute = false;
-                    Ch.TremorTick = 0;
-                    //Ch.AutoVibPos = Ch.AutoVibSweep = 0;
-                    Ch.TremorPos = 0;
-                }
-                Ch.VolVibrato = false;
-
-                Ch.FadeTick = Ch.VolEnvelope = Ch.PanEnvelope = 0;
-
-                Ch.InstTrig = Ch.Active = true;
-                Ch.KeyOff = Ch.Fading = false;
-            }
-
-            if (NoteNum == 97)
-                Ch.Fading = true;
-
-            ChkEffectRow(ThisNote, i, ByPassDelayChk, RxxRetrig);
-        }
-        else
-        {
-            Ch.Delay = Ch.Parameter & 0x0F;
-            if (Porta)
-            {
-                Ch.Period = Ch.TargetPeriod;
-                if (Ch.SmpPlaying != -1) CalcPeriod(i);
-            }
-        }
-    }
-
-    static void ChkEffectTick(uint8_t i, Note ThisNote)
-    {
-        uint8_t VolCmd = ThisNote.VolCmd;
-        uint8_t VolPara = ThisNote.VolCmd & 0x0F;
-        uint8_t Effect = ThisNote.Effect;
-        uint8_t Para = ThisNote.Parameter;
-        uint8_t SubEffect = Para & 0xF0;
-        uint8_t SubPara = Para & 0x0F;
-
-        if (Effect != 4 && Effect != 6 && !Ch.VolVibrato) Ch.VibratoPos = 0;
-        if (Effect != 27) Ch.RxxCounter = 0;
-
-        uint8_t OnTime, OffTime;
-
-        //Effect column
-        switch (Effect)
-        {
-            case 1: //1xx
-                Ch.Period -= Ch.SlideUpSpd * 4;
-                break;
-            case 2: //2xx
-                Ch.Period += Ch.SlideDnSpd * 4;
-                break;
-            case 3: //3xx
-                PortaEffect:
-                if (Ch.Period > Ch.TargetPeriod)
-                    Ch.Period -= Ch.SlideSpd * 4;
-                else if (Ch.Period < Ch.TargetPeriod)
-                    Ch.Period += Ch.SlideSpd * 4;
-                if (abs(Ch.Period - Ch.TargetPeriod) < Ch.SlideSpd * 4)
-                    Ch.Period = Ch.TargetPeriod;
-                break;
-            case 4: //4xx
-                VibratoEffect:
-                Ch.VibratoAmp = Ch.VibratoPara & 0xF;
-                Ch.VibratoPos += (Ch.VibratoPara >> 4) & 0x0F;
-                break;
-            case 5: //5xx
-                Ch.Volume += Ch.VolSlideSpd;
-                goto PortaEffect;
-                break;
-            case 6: //6xx
-                Ch.Volume += Ch.VolSlideSpd;
-                goto VibratoEffect;
-                break;
-            case 7: //7xx
-                Ch.TremorAmp = Ch.TremoloPara & 0xF;
-                Ch.TremorPos += (Ch.TremoloPara >> 4) & 0x0F;
-                break;
-            case 8: //8xx
-                Ch.Pan = Para;
-                break;
-            case 10:    //Axx
-                Ch.Volume += Ch.VolSlideSpd;
-                break;
-            case 12:    //Cxx
-                Ch.Volume = Para;
-                break;
-            case 14:    //Exx
-                switch (SubEffect)
-                {
-                    case 0x90:  //E9x
-                        if (Ch.Delay <= 0 && SubPara > 0)
-                        {
-                            ChkNote(ThisNote, i, true);
-                            Ch.Delay = SubPara;
-                        }
-                        break;
-                    case 0xC0:  //ECx
-                        if (Ch.Delay <= 0)
-                            Ch.Volume = 0;
-                        break;
-                    case 0xD0:  //EDx
-                        if (Ch.Delay <= 1 && Ch.Delay != -1 && !Ch.KeyOff) ChkNote(ThisNote, i, true);
-                        break;
-                }
-                break;
-            case 17:    //Hxx
-                GlobalVol = MAX(MIN(GlobalVol + Ch.GlobalVolSlideSpd, 64), 0);
-                break;
-            case 20:    //Kxx
-                if (Ch.Delay <= 0)
-                {
-                    Ch.KeyOff = Ch.Fading = true;
-                }
-                break;
-            case 25:    //Pxx
-                Ch.Pan += Ch.PanSlideSpd;
-                break;
-            case 27:    //Rxx
-                Ch.RxxCounter ++ ;
-                if (Ch.RxxCounter >= (Ch.RetrigPara & 0x0F) - 1)
-                {
-                    ChkNote(ThisNote, i, true, true);
-                    if ((Para & 0xF) > 0)
-                        Ch.RetrigPara = (Ch.RetrigPara&0xF0) + (Para&0xF);
-
-                    uint8_t RetrigVol = (Ch.RetrigPara >> 4) & 0x0F;
-                    if ((RetrigVol < 6) || (RetrigVol > 7 && RetrigVol < 14))
-                        Ch.Volume += RxxVolSlideTable[RetrigVol];
-                    else
-                    {
-                        switch (RetrigVol)
-                        {
-                            case 6:
-                                Ch.Volume = (Ch.Volume + Ch.Volume) / 3;
-                                break;
-                            case 7:
-                                Ch.Volume >>= 1;
-                                break;
-                            case 14:
-                                Ch.Volume = (Ch.Volume * 3) >> 1;
-                                break;
-                            case 15:
-                                Ch.Volume <<= 1;
-                                break;
-                        }
-                    }
-                    Ch.RxxCounter = 0;
-                }
-                break;
-            case 29:    //Txx
-                Ch.TremorTick ++ ;
-                OnTime = ((Ch.TremorPara >> 4) & 0xF) + 1;
-                OffTime = (Ch.TremorPara & 0xF) + 1;
-                Ch.TremorMute = (Ch.TremorTick > OnTime);
-                if (Ch.TremorTick >= OnTime + OffTime) Ch.TremorTick = 0;
-                break;
-        }
-
-        if (Ch.Delay > -1) Ch.Delay -- ;
-
-        //Volume column effects
-        switch (VolCmd & 0xF0)
-        {
-            case 0x60:  //Dx
-                Ch.Volume -= VolPara;
-                break;
-            case 0x70:  //Ux
-                Ch.Volume += VolPara;
-                break;
-            case 0xB0:  //Vx
-                Ch.VibratoAmp = Ch.VibratoPara & 0xF;
-                Ch.VibratoPos += (Ch.VibratoPara >> 4) & 0x0F;
-                Ch.VolVibrato = true;
-                break;
-            case 0xD0:  //Lx
-                Ch.Pan -= VolPara;
-                break;
-            case 0xE0:  //Rx
-                Ch.Pan += VolPara;
-                break;
-            case 0xF0:  //Mx
-                if (Ch.Period > Ch.TargetPeriod)
-                    Ch.Period -= Ch.SlideSpd * 4;
-                else if (Ch.Period < Ch.TargetPeriod)
-                    Ch.Period += Ch.SlideSpd * 4;
-                if (abs(Ch.Period - Ch.TargetPeriod) < Ch.SlideSpd * 4)
-                    Ch.Period = Ch.TargetPeriod;
-                break;
-        }
-    }
-
-    static void NextRow()
-    {
-        if (PatDelay <= 0)
-        {
-            CurRow ++ ;
-            if (PatBreak >= 0 && PatJump >= 0)
-            {
-                CurRow = PatBreak;
-                CurPos = PatJump;
-                PatRepeat = RepeatPos = 0;
-                RepeatTo = PatBreak = PatJump = -1;
-            }
-            if (PatBreak >= 0)
-            {
-                CurRow = PatBreak;
-                PatRepeat = RepeatPos = 0;
-                PatBreak = RepeatTo = -1;
-                CurPos ++ ;
-            }
-            if (PatJump >= 0)
-            {
-                CurPos = PatJump;
-                CurRow = PatRepeat = RepeatPos = 0;
-                RepeatTo = PatJump = -1;
-            }
-            if (RepeatTo >= 0)
-            {
-                CurRow = RepeatTo;
-                RepeatTo = -1;
-            }
-            if (CurRow >= *(int16_t *)(PatternData + PatternAddr[OrderTable[CurPos]]))
-            {
-                //Pattern loop bug emulation
-                CurRow = RepeatPos > 0 ? RepeatPos : 0;
-                PatRepeat = RepeatPos = 0;
-                RepeatTo = -1;
-                CurPos ++ ;
-            }
-            if (CurPos >= SongLength)
-            {
-                if (Loop)
-                    CurPos = RstPos;
-                else
-                {
-                    ResetModule();
-                    return;
-                }
-            }
-
-            int i = 0;
-            while (i < NumOfChannels)
-            {
-                Note ThisNote = GetNote(OrderTable[CurPos], CurRow, i);
-
-                if (ThisNote.Note != 0) Ch.LastNote = ThisNote.Note;
-                if (ThisNote.Instrument != 0) Ch.LastInstrument = ThisNote.Instrument;
-                Ch.VolCmd = ThisNote.VolCmd;
-                Ch.VolPara = ThisNote.VolCmd & 0x0F;
-                Ch.Effect = ThisNote.Effect;
-                Ch.Parameter = ThisNote.Parameter;
-
-                ChkNote(ThisNote, i, false);
-                //if (Ch.Delay > -1) Ch.Delay -- ;
-
-                i ++ ;
-            }
-        }
-        else PatDelay -- ;
-    }
-
-    static void NextTick()
-    {
-        int i = 0;
-        Tick ++ ;
-
-        if (Tick >= Speed) {
-            Tick = 0;
-            NextRow();
-            return;
-        }
-
-        if (CurRow >= 0)
-        {
-            while (i < NumOfChannels)
-            {
-                Note ThisNote = GetNote(OrderTable[CurPos], CurRow, i);
-
-                ChkEffectTick(i, ThisNote);
-
-                i ++ ;
-            }
-        }
-    }
-
-    /*
-    static inline void MixAudioOld(int16_t *Buffer, uint32_t Pos)
-    {
-        int32_t OutL = 0;
-        int32_t OutR = 0;
-        double Result = 0;
-
-        int i = 0;
-        while (i < NumOfChannels)
-        {
-            if (Ch.Active)
-            {
-                if (Ch.SmpPlaying != -1 && Ch.SmpPlaying < TotalSampleNum)
-                {
-                    int32_t ChPos = Ch.Pos;
-
-                    if (Ch.StartCount >= SMP_CHANGE_RAMP)
-                    {
-                        Ch.PosL16 += Ch.Delta;
-                        ChPos += Ch.PosL16 >> INT_ACC;
-                        Ch.PosL16 &= INT_MASK;
-                    }
-
-                    //Volume ramping
-                    if (Ch.VolFinalL != Ch.VolTargetL)
-                    {
-                        if (abs(Ch.VolFinalL - Ch.VolTargetL) >= abs(Ch.VolRampSpdL))
-                            Ch.VolFinalL += Ch.VolRampSpdL;
-                        else Ch.VolFinalL = Ch.VolTargetL;
-                    }
-
-                    if (Ch.VolFinalR != Ch.VolTargetR)
-                    {
-                        if (abs(Ch.VolFinalR - Ch.VolTargetR) >= abs(Ch.VolRampSpdR))
-                            Ch.VolFinalR += Ch.VolRampSpdR;
-                        else Ch.VolFinalR = Ch.VolTargetR;
-                    }
-
-                    if (Ch.VolFinalInst != Ch.VolTargetInst)
-                    {
-                        if (abs(Ch.VolFinalInst - Ch.VolTargetInst) >= abs(Ch.VolRampSpdInst))
-                            Ch.VolFinalInst += Ch.VolRampSpdInst;
-                        else Ch.VolFinalInst = Ch.VolTargetInst;
-                    }
-
-                    //Looping
-                    if (Ch.LoopType)
-                    {
-                        if (ChPos < Ch.LoopStart)
-                            Ch.Loop = 0;
-                        else if (ChPos >= Ch.LoopEnd)
-                        {
-                            ChPos = Ch.LoopStart + (ChPos - Ch.LoopStart) % Ch.LoopLeng;
-                            Ch.Loop = 1;
-                        }
-                    }
-                    else if (ChPos >= Ch.SmpLeng)
-                    {
-                        Ch.Active = false;
-                        Ch.EndSmp = Ch.Is16Bit ? *(int16_t *)(Ch.Data + ((Ch.SmpLeng - 1) << 1)) : (int16_t)(Ch.Data[Ch.SmpLeng - 1] << 8);
-                        Ch.SmpPlaying = -1;
-                        Ch.EndCount = 0;
-                    }
-
-                    Ch.Pos = ChPos;
-
-                    //Don't mix when there is no sample playing or the channel is muted
-                    if (Ch.Muted || Ch.SmpPlaying == -1) goto Continue;
-
-                    if (Ch.StartCount >= SMP_CHANGE_RAMP)
-                    {
-                        //Interpolation
-                        if (Interpolation)
-                        {
-                            int32_t PrevPos = ChPos;
-
-                            if (ChPos > 0) PrevPos -- ;
-
-                            if (Ch.Loop == 1 && ChPos <= Ch.LoopStart)
-                                PrevPos = Ch.LoopEnd - 1;
-
-                            int16_t PrevData;
-                            int32_t dy;
-
-                            uint16_t ix = Ch.PosL16 >> 1;
-
-                            if (Ch.Is16Bit)
-                            {
-                                PrevData = *(int16_t *)(Ch.Data + (PrevPos << 1));
-                                dy = *(int16_t *)(Ch.Data + (ChPos << 1)) - PrevData;
-                            }
-                            else
-                            {
-                                PrevData = Ch.Data[PrevPos] << 8;
-                                dy = (Ch.Data[ChPos] << 8) - PrevData;
-                            }
-
-                            Result = (PrevData + ((dy * ix) >> INT_ACC_INTERPOL));
-                        }
-                        else
-                        {
-                            if (Ch.Is16Bit) Result = *(int16_t *)(Ch.Data + (ChPos << 1));
-                            else Result = (int16_t)(Ch.Data[ChPos] << 8);
-                        }
-
-                        if (Ch.StartCount < SMP_CHANGE_RAMP + SMP_CHANGE_RAMP)
-                        {
-                            Result = Result * (Ch.StartCount - SMP_CHANGE_RAMP) / SMP_CHANGE_RAMP;
-                            Ch.StartCount ++ ;
-                        }
-                        Ch.PrevSmp = Result;
-                    }
-                    else
-                    {
-                        Result = Ch.PrevSmp * (SMP_CHANGE_RAMP - Ch.StartCount) / SMP_CHANGE_RAMP;
-                        Ch.StartCount ++ ;
-                    }
-
-                    Result *= AmpFinal * MasterVol * Ch.VolFinalInst / (64.0 * TOINT_SCL_RAMPING);
-
-                    OutL += Result * (Ch.VolFinalL >> INT_ACC_RAMPING);
-                    OutR += Result * (Ch.VolFinalR >> INT_ACC_RAMPING);
-                }
-                else goto NotActived;
-            }
-            else
-            {
-                NotActived:
-
-                Ch.Pos = Ch.PosL16 = 0;
-                Ch.PrevSmp = 0;
-                Ch.StartCount = 0;
-            }
-
-            Continue:
-
-            if (Ch.EndCount < SMP_CHANGE_RAMP)
-            {
-                Result = Ch.EndSmp * (SMP_CHANGE_RAMP - Ch.EndCount) / SMP_CHANGE_RAMP;
-                Ch.EndCount ++ ;
-
-                Result *= AmpFinal * MasterVol * Ch.VolFinalInst / (64.0 * TOINT_SCL_RAMPING);
-
-                OutL += Result * (Ch.VolFinalL >> INT_ACC_RAMPING);
-                OutR += Result * (Ch.VolFinalR >> INT_ACC_RAMPING);
-            }
-
-            i ++ ;
-        }
-
-        Buffer[Pos << 1] = OutL >> 16;
-        Buffer[(Pos << 1) + 1] = OutR >> 16;
-    }
-    */
+#ifdef _SDL2
+	SDL_AudioSpec AudioSpec, ActualSpec;
+	SDL_AudioDeviceID DeviceID;
+#endif
+
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
+	static char songName[21];
+	static char trackerName[21];
+	static int16_t trackerVersion;
+
+	static bool loop;
+	static bool stereo;
+	static double amplifier = 1;
+	static bool ignoreF00 = false;
+	static int8_t panMode = 0;
+
+	static int bufferSize;
+	static int sampleRate;
+	static bool isPlaying = false;
+	static bool interpolation;
+	static uint8_t masterVolume;
+
+	static bool useAmigaFreqTable;
+	static int16_t numOfChannels;
+	static int16_t numOfPatterns;
+	static int16_t numOfInstruments;
+	static uint8_t orderTable[256];
+
+	static int16_t songLength;
+	static int16_t rstPos;
+	static int16_t defaultTempo;
+	static int16_t defaultSpd;
+
+	static uint8_t *songData;
+	static uint8_t *patternData;
+	static int8_t *sampleData;
+	//static int16_t *sndBuffer[2];
+
+	struct Instrument
+	{
+		int16_t sampleNum;
+		int16_t fadeOut;
+		int16_t sampleMap[96];
+		int16_t volEnvelops[24];
+		int16_t panEnvelops[24];
+		char name[23];
+		int8_t volPoints;
+		int8_t panPoints;
+		uint8_t volSustainPt;
+		uint8_t volLoopStart;
+		uint8_t volLoopEnd;
+		uint8_t panSustainPt;
+		uint8_t panLoopStart;
+		uint8_t panLoopEnd;
+		int8_t volType;
+		int8_t panType;
+		int8_t vibratoType;
+		int8_t vibratoSweep;
+		int8_t vibratoDepth;
+		int8_t vibratoRate;
+	};
+
+	struct Sample
+	{
+		int32_t length;
+		int32_t loopStart;
+		int32_t loopLength;
+		int8_t *data;
+		int8_t volume;
+		int8_t fineTune;
+		int8_t type;
+		int8_t relNote;
+		uint8_t origInst;
+		bool is16Bit;
+		uint8_t pan;
+		char name[23];
+	};
+
+	static int32_t totalPatSize;
+	static int32_t totalInstSize;
+	static int32_t totalSampleSize;
+	static int32_t totalSampleNum;
+	static int32_t patternAddr[256];
+	static Instrument *instruments;
+	static Sample *samples;
+	static int16_t *sampleStartIndex;
+	static int32_t *sampleHeaderAddr;
+
+	static int16_t tick, curRow, curPos;
+	static int16_t patBreak, patJump, patDelay;
+	static int16_t patRepeat, repeatPos, repeatTo;
+	static uint8_t speed, tempo, globalVol;
+	static int32_t sampleToNextTick;
+	static double timer, timePerSample, timePerTick, samplePerTick;
+	static bool songLoaded = false;
+	static double amplifierFinal;
+
+	static long startTime, endTime, excuteTime;
+
+	static uint8_t vibTab[32] =
+	{
+		  0, 24, 49, 74, 97,120,141,161,
+		180,197,212,224,235,244,250,253,
+		255,253,250,244,235,224,212,197,
+		180,161,141,120, 97, 74, 49, 24
+	};
+
+	static uint16_t periodTab[105] =
+	{
+		907,900,894,887,881,875,868,862,856,850,844,838,832,826,820,814,
+		808,802,796,791,785,779,774,768,762,757,752,746,741,736,730,725,
+		720,715,709,704,699,694,689,684,678,675,670,665,660,655,651,646,
+		640,636,632,628,623,619,614,610,604,601,597,592,588,584,580,575,
+		570,567,563,559,555,551,547,543,538,535,532,528,524,520,516,513,
+		508,505,502,498,494,491,487,484,480,477,474,470,467,463,460,457,
+		453,450,447,445,442,439,436,433,428
+	};
+
+	static int8_t fineTuneTable[32] =
+	{
+		   0,  16,  32,  48,  64,  80,  96, 112,
+		-128,-112, -96, -80, -64, -48, -32, -16,
+		-128,-112, -96, -80, -64, -48, -32, -16,
+		   0,  16,  32,  48,  64,  80,  96, 112
+	};
+
+	static int8_t RxxVolSlideTable[16] =
+	{
+		0, -1, -2, -4, -8, -16,  0,  0,
+		0,  1,  2,  4,  8,  16,  0,  0
+	};
+
+	struct Channel
+	{
+		int8_t note;
+		int8_t relNote;
+		int8_t noteArpeggio;
+		uint8_t lastNote;
+		int8_t fineTune;
+
+		uint8_t instrument;
+		uint8_t nextInstrument;
+		uint8_t lastInstrument;
+
+		uint8_t volCmd;
+		uint8_t volPara;
+		int16_t volume;
+		int16_t lastVol;
+		int16_t samplePlaying;
+		int16_t sample;
+		int16_t pan;
+		int16_t panFinal;
+		int16_t volEnvelope;
+		int16_t panEnvelope;
+		int16_t delay;
+		int16_t RxxCounter;
+		int16_t fadeTick;
+		uint8_t effect;
+		uint8_t parameter;
+
+		uint8_t vibratoPos;
+		uint8_t vibratoAmp;
+		uint8_t vibratoType;
+		bool volVibrato;
+		uint8_t tremorPos;
+		uint8_t tremorAmp;
+		uint8_t tremorType;
+
+		uint8_t slideUpSpd;
+		uint8_t slideDnSpd;
+		uint8_t slideSpd;
+		uint8_t vibratoPara;
+		uint8_t tremoloPara;
+		int8_t volSlideSpd;
+		uint8_t fineProtaUp;
+		uint8_t fineProtaDn;
+		uint8_t fineVolUp;
+		uint8_t fineVolDn;
+		int8_t globalVolSlideSpd;
+		int8_t panSlideSpd;
+		uint8_t retrigPara;
+		uint8_t tremorPara;
+		uint8_t EFProtaUp;
+		uint8_t EFProtaDn;
+
+		int8_t tremorTick;
+		bool tremorMute;
+
+		uint8_t autoVibPos;
+		uint8_t autoVibSweep;
+		int8_t envFlags;
+
+		bool instTrig;
+		bool LxxEffect;
+		bool active;
+		bool fading;
+		bool keyOff;
+
+		//Current playing sample
+		bool muted;
+		int8_t loop;
+		int8_t loopType;
+		bool is16Bit;
+		int16_t period;
+		int16_t targetPeriod;
+		int16_t periodOfs;
+		int16_t startCount;
+		int16_t endCount;
+		int32_t smpLeng;
+		int32_t loopStart;
+		int32_t loopEnd;
+		int32_t loopLeng;
+		int32_t delta;
+		float facL;
+		float facR;
+		int8_t *data;
+		int8_t *dataPrev;
+		int32_t pos;
+		int32_t posL16;
+		int32_t volTargetInst;
+		int32_t volFinalInst;
+		int32_t volTargetL;
+		int32_t volTargetR;
+		int32_t volFinalL;
+		int32_t volFinalR;
+		int32_t volRampSpdL;
+		int32_t volRampSpdR;
+		int32_t volRampSpdInst;
+		int32_t prevSmp;
+		int32_t endSmp;
+	};
+
+	struct Note
+	{
+		uint8_t note;
+		uint8_t instrument;
+		uint8_t volCmd;
+		uint8_t effect;
+		uint8_t parameter;
+	};
+
+	struct EnvInfo
+	{
+		uint8_t value;
+		int16_t maxPoint;
+	};
+
+	static Channel *channels;
+
+#define Ch channels[i]
+
+	static void RecalcAmp()
+	{
+		amplifierFinal = amplifier * 0.5;// /(MIN(3, MAX(1, numOfChannels/10)))*.7;
+	}
+
+	static void UpdateTimer()
+	{
+		timePerTick = 2.5 / tempo;
+		samplePerTick = timePerTick / timePerSample;
+	}
+
+	static void ResetChannels()
+	{
+		int i = 0;
+		while (i < numOfChannels)
+		{
+			Ch.note = 0;
+			Ch.relNote = 0;
+			Ch.noteArpeggio = 0;
+			Ch.lastNote = 0;
+			Ch.pos = 0;
+			Ch.delta = 0;
+			Ch.period = 0;
+			Ch.targetPeriod = 0;
+			Ch.fineTune = 0;
+			Ch.loop = 0;
+
+			Ch.samplePlaying = -1;
+			Ch.sample = -1;
+			Ch.instrument = 0;
+			Ch.nextInstrument = 0;
+			Ch.lastInstrument = 0;
+
+			Ch.volCmd = 0;
+			Ch.volume = 0;
+			Ch.lastVol = 0;
+			Ch.volTargetInst = 0;
+			Ch.volTargetL = 0;
+			Ch.volTargetR = 0;
+			Ch.volFinalL = 0;
+			Ch.volFinalR = 0;
+			Ch.volFinalInst = 0;
+			Ch.volRampSpdL = 0;
+			Ch.volRampSpdR = 0;
+			Ch.pan = 128;
+			Ch.panFinal = 128;
+
+			Ch.effect = 0;
+			Ch.parameter = 0;
+
+			Ch.vibratoPos = 0;
+			Ch.vibratoAmp = 0;
+			Ch.vibratoType = 0;
+			Ch.volVibrato = false;
+			Ch.tremorPos = 0;
+			Ch.tremorAmp = 0;
+			Ch.tremorType = 0;
+
+			Ch.slideUpSpd = 0;
+			Ch.slideDnSpd = 0;
+			Ch.slideSpd = 0;
+			Ch.vibratoPara = 0;
+			Ch.tremoloPara = 0;
+			Ch.volSlideSpd = 0;
+			Ch.fineProtaUp = 0;
+			Ch.fineProtaDn = 0;
+			Ch.fineVolUp = 0;
+			Ch.fineVolDn = 0;
+			Ch.globalVolSlideSpd = 0;
+			Ch.panSlideSpd = 0;
+			Ch.retrigPara = 0;
+			Ch.EFProtaUp = 0;
+			Ch.EFProtaDn = 0;
+
+			Ch.delay = 0;
+			Ch.RxxCounter = 0;
+			Ch.tremorTick = 0;
+			Ch.tremorMute = false;
+
+			Ch.startCount = 0;
+			Ch.endCount = SMP_CHANGE_RAMP;
+			Ch.prevSmp = 0;
+			Ch.endSmp = 0;
+
+			Ch.autoVibPos = 0;
+			Ch.autoVibSweep = 0;
+			Ch.volEnvelope = 0;
+			Ch.panEnvelope = 0;
+			Ch.envFlags = 0;
+
+			Ch.instTrig = false;
+			Ch.active = false;
+			Ch.fading = false;
+			Ch.keyOff = false;
+			Ch.fadeTick = 0;
+
+			Ch.muted = false;
+
+			i ++;
+		}
+	}
+
+#ifdef _SFML
+	static void FillBuffer(int16_t *buffer);
+
+	class CustomSoundStream : public sf::SoundStream
+	{
+	private:
+		sf::Int16 *buffer;
+
+		bool onGetData(Chunk &data) override
+		{
+			data.samples = buffer;
+			data.sampleCount = bufferSize * 2;
+
+			FillBuffer(buffer);
+
+			return isPlaying;
+		}
+
+		void onSeek(sf::Time timeOffset) override
+		{ }
+
+	public:
+		CustomSoundStream()
+		{
+			initialize(2, sampleRate);
+			buffer = (sf::Int16 *)malloc(sizeof(int16_t) * 2 * bufferSize);
+		}
+
+		~CustomSoundStream()
+		{
+			if (buffer != NULL)
+				free(buffer);
+		}
+	};
+
+	CustomSoundStream *customStream;
+#endif
+
+	static void ResetPatternEffects()
+	{
+		sampleToNextTick = 0;
+
+		globalVol = 64;
+
+		patBreak = -1;
+		patJump = -1;
+		patDelay = 0;
+
+		patRepeat = 0;
+		repeatPos = 0;
+		repeatTo = -1;
+	}
+
+	void ResetModule()
+	{
+#ifdef _SDL2
+		SDL_PauseAudioDevice(DeviceID, 0);
+#endif
+#ifdef _SFML
+		if (customStream != NULL)
+			customStream->stop();
+#endif
+		isPlaying = false;
+
+		tempo = defaultTempo;
+		speed = defaultSpd;
+		tick = speed - 1;
+
+		curRow = -1;
+		curPos = 0;
+
+		ResetPatternEffects();
+
+		RecalcAmp();
+
+		ResetChannels();
+
+		UpdateTimer();
+	}
+
+	bool LoadModule(uint8_t *songDataOrig, uint32_t songDataLeng, bool useInterpolation = true, bool stereoEnabled = true, bool loopSong = true, int bufSize = BUFFER_SIZE, int smpRate = SMP_RATE)
+	{
+		loop = loopSong;
+		stereo = stereoEnabled;
+		interpolation = useInterpolation;
+
+		panMode = 0;
+		ignoreF00 = true;
+
+		sampleRate = smpRate;
+		bufferSize = bufSize;
+
+		timePerSample = 1.0 / sampleRate;
+
+		masterVolume = 255;
+
+		int i, j, k;
+		int32_t songDataOfs = 17;
+
+		//Song data init
+		if (songData != NULL) free(songData);
+		songData = (uint8_t *)malloc(songDataLeng);
+		if (songData == NULL) return false;
+
+		memcpy(songData, songDataOrig, songDataLeng);
+
+		//Song name
+		i = 0;
+		while (i < 20)
+			songName[i++] = songData[songDataOfs++];
+
+		//Tracker name & version
+		songDataOfs = 38;
+		i = 0;
+		while (i < 20)
+			trackerName[i++] = songData[songDataOfs++];
+
+		trackerVersion = (((((uint16_t)songData[songDataOfs]) << 8) & 0xFF00) | songData[songDataOfs + 1]);
+
+		songDataOfs = 60;
+
+		//Song settings
+		int32_t HeaderSize = *(int32_t *)(songData + songDataOfs) + 60;
+		songLength = *(int16_t *)(songData + songDataOfs + 4);
+		rstPos = *(int16_t *)(songData + songDataOfs + 6);
+		numOfChannels = *(int16_t *)(songData + songDataOfs + 8);
+		numOfPatterns = *(int16_t *)(songData + songDataOfs + 10);
+		numOfInstruments = *(int16_t *)(songData + songDataOfs + 12);
+		useAmigaFreqTable = !(songData[songDataOfs + 14] & 1);
+
+		defaultSpd = *(int16_t *)(songData + songDataOfs + 16);
+		defaultTempo = *(int16_t *)(songData + songDataOfs + 18);
+
+		if (channels != NULL) free(channels);
+		channels = (Channel *)malloc(sizeof(Channel) * numOfChannels);
+		if (channels == NULL) return false;
+
+		//Pattern order table
+		songDataOfs = 80;
+		i = 0;
+		while (i < songLength)
+			orderTable[i++] = songData[songDataOfs++];
+
+		//Pattern data size calc
+		memset(patternAddr, 0, 256 * 4);
+		totalPatSize = 0;
+
+		songDataOfs = HeaderSize;
+		int32_t patternOrig = songDataOfs;
+		i = 0;
+		while (i < numOfPatterns)
+		{
+			int32_t patHeaderSize = *(int32_t *)(songData + songDataOfs);
+			int16_t patternLeng = *(int16_t *)(songData + songDataOfs + 5);
+			int16_t patternSize = *(int16_t *)(songData + songDataOfs + 7);
+
+			patternAddr[i++] = totalPatSize;
+
+			songDataOfs += patHeaderSize + patternSize;
+
+			totalPatSize += 2 + patternLeng * ROW_SIZE_XM;
+		}
+
+		//Pattern data init
+		if (patternData != NULL) free(patternData);
+		patternData = (uint8_t *)malloc(totalPatSize);
+		if (patternData == NULL) return false;
+		memset(patternData, 0, totalPatSize);
+
+		//Patter data
+		songDataOfs = patternOrig;
+		i = 0;
+		while (i < numOfPatterns)
+		{
+			int32_t patHeaderSize = *(int32_t *)(songData + songDataOfs);
+			int16_t patternLeng = *(int16_t *)(songData + songDataOfs + 5);
+			int16_t patternSize = *(int16_t *)(songData + songDataOfs + 7);
+
+			int32_t PDIndex = patternAddr[i];
+			patternData[PDIndex++] = patternLeng & 0xFF;
+			patternData[PDIndex++] = (int8_t)((patternLeng >> 8) & 0xFF);
+
+			songDataOfs += patHeaderSize;
+
+			if (patternSize > 0)
+			{
+				j = 0;
+				while (j < patternLeng)
+				{
+					k = 0;
+					while (k < numOfChannels)
+					{
+						int8_t SignByte = songData[songDataOfs++];
+
+						patternData[PDIndex] = 0;
+						patternData[PDIndex + 1] = 0;
+
+						if (SignByte & 0x80)
+						{
+							if (SignByte & 0x01) patternData[PDIndex] = songData[songDataOfs++];
+							if (SignByte & 0x02) patternData[PDIndex + 1] = songData[songDataOfs++];
+							if (SignByte & 0x04) patternData[PDIndex + 2] = songData[songDataOfs++];
+							if (SignByte & 0x08) patternData[PDIndex + 3] = songData[songDataOfs++];
+							if (SignByte & 0x10) patternData[PDIndex + 4] = songData[songDataOfs++];
+						}
+						else
+						{
+							patternData[PDIndex] = SignByte;
+							patternData[PDIndex + 1] = songData[songDataOfs++];
+							patternData[PDIndex + 2] = songData[songDataOfs++];
+							patternData[PDIndex + 3] = songData[songDataOfs++];
+							patternData[PDIndex + 4] = songData[songDataOfs++];
+						}
+						PDIndex += 5;
+						k ++;
+					}
+					j ++;
+				}
+			}
+			i ++;
+		}
+
+		//instrument size calc
+		if (sampleStartIndex != NULL) free(sampleStartIndex);
+		sampleStartIndex = (int16_t *)malloc(numOfInstruments * 2);
+		if (sampleStartIndex == NULL) return false;
+
+		if (instruments != NULL) free(instruments);
+		instruments = (Instrument *)malloc(numOfInstruments * sizeof(Instrument));
+		if (instruments == NULL) return false;
+
+		totalInstSize = totalSampleSize = totalSampleNum = 0;
+		int instOrig = songDataOfs;
+		i = 0;
+		while (i < numOfInstruments)
+		{
+			int32_t instSize = *(int32_t *)(songData + songDataOfs);
+			int16_t instSampleNum = *(int16_t *)(songData + songDataOfs + 27);
+			instruments[i].sampleNum = instSampleNum;
+
+			//name
+			k = 0;
+			while (k < 22)
+			{
+				instruments[i].name[k] = songData[songDataOfs + 4 + k];
+				k ++;
+			}
+
+			if (instSampleNum > 0)
+			{
+				//note mapping
+				j = 0;
+				while (j < 96)
+				{
+					instruments[i].sampleMap[j] = totalSampleNum + songData[songDataOfs + 33 + j];
+					j ++;
+				}
+
+				//Vol envelopes
+				j = 0;
+				while (j < 24)
+				{
+					instruments[i].volEnvelops[j] = *(int16_t *)(songData + songDataOfs + 129 + j * 2);
+					j ++;
+				}
+
+				//pan envelopes
+				j = 0;
+				while (j < 24)
+				{
+					instruments[i].panEnvelops[j] = *(int16_t *)(songData + songDataOfs + 177 + j * 2);
+					j ++;
+				}
+
+				instruments[i].volPoints = songData[songDataOfs + 225];
+				instruments[i].panPoints = songData[songDataOfs + 226];
+				instruments[i].volSustainPt = songData[songDataOfs + 227];
+				instruments[i].volLoopStart = songData[songDataOfs + 228];
+				instruments[i].volLoopEnd = songData[songDataOfs + 229];
+				instruments[i].panSustainPt = songData[songDataOfs + 230];
+				instruments[i].panLoopStart = songData[songDataOfs + 231];
+				instruments[i].panLoopEnd = songData[songDataOfs + 232];
+				instruments[i].volType = songData[songDataOfs + 233];
+				instruments[i].panType = songData[songDataOfs + 234];
+				instruments[i].vibratoType = songData[songDataOfs + 235];
+				instruments[i].vibratoSweep = songData[songDataOfs + 236];
+				instruments[i].vibratoDepth = songData[songDataOfs + 237];
+				instruments[i].vibratoRate = songData[songDataOfs + 238];
+				instruments[i].fadeOut = *(int16_t *)(songData + songDataOfs + 239);
+
+				songDataOfs += instSize;
+
+				int32_t subOfs = 0;
+				int32_t sampleDataOfs = 0;
+				j = 0;
+				while (j < instSampleNum)
+				{
+					subOfs = j * 40;
+					int32_t sampleLeng = *(int32_t *)(songData + songDataOfs + subOfs);
+					int32_t loopStart = *(int32_t *)(songData + songDataOfs + subOfs + 4);
+					int32_t loopLeng = *(int32_t *)(songData + songDataOfs + subOfs + 8);
+					int8_t sampleType = songData[songDataOfs + subOfs + 14] & 0x03;
+
+					sampleDataOfs += sampleLeng;
+
+					if (sampleType == 1)
+						sampleLeng = loopStart + loopLeng;
+					if ((songData[songDataOfs + subOfs + 14] & 0x03) >= 2)
+						sampleLeng = loopStart + (loopLeng + loopLeng);
+
+					totalSampleSize += sampleLeng;
+					j ++;
+				}
+				songDataOfs += instSampleNum * 40 + sampleDataOfs;
+			}
+			else songDataOfs += instSize;
+
+			sampleStartIndex[i] = totalSampleNum;
+			totalSampleNum += instSampleNum;
+
+			i ++;
+		}
+
+		//sample convert
+		if (sampleHeaderAddr != NULL) free(sampleHeaderAddr);
+		sampleHeaderAddr = (int32_t *)malloc(totalSampleNum * 4);
+		if (sampleHeaderAddr == NULL) return false;
+
+
+		if (sampleData != NULL) free(sampleData);
+		sampleData = (int8_t *)malloc(totalSampleSize);
+		if (sampleData == NULL) return false;
+
+		if (samples != NULL) free(samples);
+		samples = (Sample *)malloc(totalSampleNum * sizeof(Sample));
+		if (samples == NULL) return false;
+
+		int16_t sampleNum = 0;
+		int32_t sampleWriteOfs = 0;
+		songDataOfs = instOrig;
+		i = 0;
+		while (i < numOfInstruments)
+		{
+			int32_t instSize = *(int32_t *)(songData + songDataOfs);
+			int16_t instSampleNum = *(int16_t *)(songData + songDataOfs + 27);
+
+			songDataOfs += instSize;
+
+			if (instSampleNum > 0)
+			{
+				int32_t subOfs = 0;
+				int32_t sampleDataOfs = 0;
+				j = 0;
+				while (j < instSampleNum)
+				{
+					sampleNum = sampleStartIndex[i] + j;
+					subOfs = j * 40;
+					sampleHeaderAddr[sampleNum] = songDataOfs + subOfs;
+					int32_t sampleLeng = *(int32_t *)(songData + songDataOfs + subOfs);
+					int32_t loopStart = *(int32_t *)(songData + songDataOfs + subOfs + 4);
+					int32_t loopLeng = *(int32_t *)(songData + songDataOfs + subOfs + 8);
+					int8_t sampleType = songData[songDataOfs + subOfs + 14];
+					bool is16Bit = (sampleType & 0x10);
+
+					int16_t sampleNum = sampleStartIndex[i] + j;
+
+					samples[sampleNum].origInst = i + 1;
+					samples[sampleNum].type = sampleType & 0x03;
+					samples[sampleNum].is16Bit = is16Bit;
+
+					samples[sampleNum].volume = songData[songDataOfs + subOfs + 12];
+					samples[sampleNum].pan = songData[songDataOfs + subOfs + 15];
+					samples[sampleNum].fineTune = *(int8_t *)(songData + songDataOfs + subOfs + 13);
+					samples[sampleNum].relNote = *(int8_t *)(songData + songDataOfs + subOfs + 16);
+
+					k = 0;
+					while (k < 22)
+					{
+						samples[sampleNum].name[k] = songData[songDataOfs + subOfs + 18 + k];
+						k ++;
+					}
+
+					samples[sampleNum].data = sampleData + sampleWriteOfs;
+					subOfs = 40 * instSampleNum + sampleDataOfs;
+					sampleDataOfs += sampleLeng;
+
+					if (is16Bit)
+					{
+						samples[sampleNum].length = sampleLeng >> 1;
+						samples[sampleNum].loopStart = loopStart >> 1;
+						samples[sampleNum].loopLength = loopLeng >> 1;
+					}
+					else
+					{
+						samples[sampleNum].length = sampleLeng;
+						samples[sampleNum].loopStart = loopStart;
+						samples[sampleNum].loopLength = loopLeng;
+					}
+
+					int32_t reversePoint = -1;
+					if (samples[sampleNum].type == 1)
+						sampleLeng = loopStart + loopLeng;
+					else if (samples[sampleNum].type >= 2)
+					{
+						reversePoint = loopStart + loopLeng;
+						sampleLeng = reversePoint + loopLeng;
+					}
+
+					bool reverse = false;
+					int32_t readOfs = 0;
+					int16_t oldPt = 0;
+					k = 0;
+					if (is16Bit)
+					{
+						int16_t newPt;
+						sampleLeng >>= 1;
+						reversePoint >>= 1;
+						while (k < sampleLeng)
+						{
+							//int16_t newPt = (int16_t)SONGSEEK16(songDataOfs + subOfs, songData) + oldPt;
+							if (k == reversePoint)
+							{
+								reverse = true;
+								readOfs -= 2;
+							}
+							if (reverse)
+							{
+								newPt = -*(int16_t *)(songData + songDataOfs + subOfs + readOfs) + oldPt;
+								readOfs -= 2;
+							}
+							else
+							{
+								newPt = *(int16_t *)(songData + songDataOfs + subOfs + readOfs) + oldPt;
+								readOfs += 2;
+							}
+							*(int16_t *)(sampleData + sampleWriteOfs) = newPt;
+							sampleWriteOfs += 2;
+
+							oldPt = newPt;
+							k ++;
+						}
+					}
+					else
+					{
+						int8_t newPt;
+						while (k < sampleLeng)
+						{
+							if (k == reversePoint)
+							{
+								reverse = true;
+								readOfs --;
+							}
+							if (reverse)
+							{
+								newPt = -songData[songDataOfs + subOfs + readOfs] + oldPt;
+								readOfs --;
+							}
+							else
+							{
+								newPt = songData[songDataOfs + subOfs + readOfs] + oldPt;
+								readOfs ++;
+							}
+							sampleData[sampleWriteOfs++] = newPt;
+
+							oldPt = newPt;
+							k ++;
+						}
+					}
+
+					j ++;
+					//sampleNum ++ ;
+				}
+				songDataOfs += 40 * instSampleNum + sampleDataOfs;
+			}
+			i ++;
+		}
+
+		if (sampleHeaderAddr != NULL) free(sampleHeaderAddr);
+		if (sampleStartIndex != NULL) free(sampleStartIndex);
+
+		if (songData != NULL) free(songData);
+
+		ResetModule();
+		songLoaded = true;
+
+		return true;
+	}
+
+	static Note GetNote(uint8_t pos, uint8_t row, uint8_t col)
+	{
+		Note thisNote = *(Note *)(patternData + patternAddr[pos] + ROW_SIZE_XM * row + col * NOTE_SIZE_XM + 2);
+
+		return thisNote;
+	}
+
+	static EnvInfo CalcEnvelope(Instrument inst, int16_t pos, bool calcPan)
+	{
+		EnvInfo retInfo;
+
+		if (inst.sampleNum > 0)
+		{
+			int16_t *envData = calcPan ? inst.panEnvelops : inst.volEnvelops;
+			int8_t numOfPoints = calcPan ? inst.panPoints : inst.volPoints;
+			retInfo.maxPoint = envData[(numOfPoints - 1) * 2];
+
+			if (pos == 0)
+			{
+				retInfo.value = envData[1];
+				return retInfo;
+			}
+
+			int i = 0;
+			while (i < numOfPoints - 1)
+			{
+				if (pos < envData[i * 2 + 2])
+				{
+					int16_t prevPos = envData[i * 2];
+					int16_t nextPos = envData[i * 2 + 2];
+					int16_t prevValue = envData[i * 2 + 1];
+					int16_t nextValue = envData[i * 2 + 3];
+					retInfo.value = (int8_t)((nextValue - prevValue) * (pos - prevPos) / (nextPos - prevPos) + prevValue);
+					return retInfo;
+				}
+				i ++;
+			}
+
+			retInfo.value = envData[(numOfPoints - 1) * 2 + 1];
+			return retInfo;
+		}
+		else
+		{
+			retInfo.value = 0;
+			retInfo.maxPoint = 0;
+		}
+
+		return retInfo;
+	}
+
+#define PI 3.1415926535897932384626433832795
+
+	static void CalcPeriod(uint8_t i)
+	{
+		int16_t realNote = (Ch.noteArpeggio <= 119 && Ch.noteArpeggio > 0 ? Ch.noteArpeggio : Ch.note) + Ch.relNote - 1;
+		int8_t fineTune = Ch.fineTune;
+		int16_t period;
+		if (!useAmigaFreqTable)
+			period = 7680 - realNote * 64 - fineTune / 2;
+		else
+		{
+			//https://github.com/dodocloud/xmplayer/blob/master/src/xmlib/engine/utils.ts
+			//function calcPeriod
+			double fineTuneFrac = floor((double)fineTune / 16.0);
+			uint16_t period1 = periodTab[8 + (realNote % 12) * 8 + (int16_t)fineTuneFrac];
+			uint16_t period2 = periodTab[8 + (realNote % 12) * 8 + (int16_t)fineTuneFrac + 1];
+			fineTuneFrac = ((double)fineTune / 16.0) - fineTuneFrac;
+			period = (int16_t)round((1.0 - fineTuneFrac) * period1 + fineTuneFrac * period2) * (16.0 / pow(2, floor(realNote / 12) - 1));
+		}
+
+		Ch.period = MAX(Ch.period, 50);
+		period = MAX(period, 50);
+
+		if (Ch.noteArpeggio <= 119 && Ch.noteArpeggio > 0)
+			Ch.period = period;
+		else
+			Ch.targetPeriod = period;
+	}
+
+	static void UpdateChannelInfo()
+	{
+		int i = 0;
+		while (i < numOfChannels)
+		{
+			if (Ch.active && Ch.samplePlaying != -1)
+			{
+				//arpeggio
+				if (Ch.parameter != 0 && Ch.effect == 0)
+				{
+					int8_t arpNote1 = Ch.parameter >> 4;
+					int8_t arpNote2 = Ch.parameter & 0xF;
+					int8_t arpeggio[3] = { 0, arpNote2, arpNote1 };
+					if (useAmigaFreqTable) Ch.noteArpeggio = Ch.note + arpeggio[tick % 3];
+					else Ch.periodOfs = -arpeggio[tick % 3] * 64;
+					//Ch.period = Ch.targetPeriod;
+				}
+
+				//Auto vibrato
+				int32_t autoVibFinal = 0;
+				if (Ch.samplePlaying != -1)
+				{
+					Instrument smpOrigInst = instruments[samples[Ch.samplePlaying].origInst - 1];
+
+					if (smpOrigInst.sampleNum > 0)
+					{
+						Ch.autoVibPos += smpOrigInst.vibratoRate;
+						if (Ch.autoVibSweep < smpOrigInst.vibratoSweep) Ch.autoVibSweep ++;
+
+						if (smpOrigInst.vibratoRate)
+						{
+							//https://github.com/milkytracker/MilkyTracker/blob/master/src/milkyplay/PlayerSTD.cpp
+							//Line 568 - 599
+							uint8_t vibPos = Ch.autoVibPos >> 2;
+							uint8_t vibDepth = smpOrigInst.vibratoDepth;
+
+							int32_t value = 0;
+							switch (smpOrigInst.vibratoType) {
+								// sine (we must invert the phase here)
+							case 0:
+								value = ~vibTab[vibPos & 31];
+								break;
+								// square
+							case 1:
+								value = 255;
+								break;
+								// ramp down (down being the period here - so ramp frequency up ;)
+							case 2:
+								value = ((vibPos & 31) * 539087) >> 16;
+								if ((vibPos & 63) > 31) value = 255 - value;
+								break;
+								// ramp up (up being the period here - so ramp frequency down ;)
+							case 3:
+								value = ((vibPos & 31) * 539087) >> 16;
+								if ((vibPos & 63) > 31) value = 255 - value;
+								value = -value;
+								break;
+							}
+
+							autoVibFinal = ((value * vibDepth) >> 1);
+							if (smpOrigInst.vibratoSweep) {
+								autoVibFinal *= ((int32_t)Ch.autoVibSweep << 8) / smpOrigInst.vibratoSweep;
+								autoVibFinal >>= 8;
+							}
+
+							if ((vibPos & 63) > 31) autoVibFinal = -autoVibFinal;
+
+							autoVibFinal >>= 7;
+						}
+					}
+				}
+
+				//delta calculation
+				CalcPeriod(i);
+				double freq;
+				double realPeriod = MAX(Ch.period + Ch.periodOfs, 50) + Ch.vibratoAmp * sin((Ch.vibratoPos & 0x3F) * PI / 32) * 8 + autoVibFinal;
+				if (!useAmigaFreqTable)
+					freq = 8363 * pow(2, (4608 - realPeriod) / 768);
+				else freq = 8363.0 * 1712 / realPeriod;
+
+				Ch.delta = (uint32_t)(freq / sampleRate * TOINT_SCL);
+
+				Instrument Inst = instruments[Ch.instrument - 1];
+
+				//volume
+				Ch.volume = MAX(MIN(Ch.volume, 64), 0);
+				int16_t realVol = Ch.tremorMute ? 0 : (int8_t)MAX(MIN(Ch.volume + Ch.tremorAmp * sin((Ch.tremorPos & 0x3F) * PI / 32) * 4, 64), 0);
+				int16_t volTarget = realVol * globalVol / 64;
+				if (Inst.volType & 0x01)
+				{
+					EnvInfo volEnv = CalcEnvelope(Inst, Ch.volEnvelope, false);
+
+					if (Inst.volType & 0x02)
+					{
+						if (Ch.volEnvelope != Inst.volEnvelops[Inst.volSustainPt * 2] || Ch.fading)
+							Ch.volEnvelope ++;
+					}
+					else Ch.volEnvelope ++;
+
+					if (Inst.volType & 0x04)
+					{
+						if (Ch.volEnvelope >= Inst.volEnvelops[Inst.volLoopEnd * 2])
+							Ch.volEnvelope = Inst.volEnvelops[Inst.volLoopStart * 2];
+					}
+
+					if (Ch.volEnvelope >= volEnv.maxPoint)
+						Ch.volEnvelope = volEnv.maxPoint;
+
+					int16_t instFadeout = Inst.fadeOut;
+					int32_t fadeOutVol;
+					if (Ch.fading && instFadeout > 0)
+					{
+						int16_t FadeOutLeng = 32768 / instFadeout;
+						if (Ch.fadeTick < FadeOutLeng) Ch.fadeTick ++;
+						else Ch.active = false;
+						fadeOutVol = 64 * (FadeOutLeng - Ch.fadeTick) / FadeOutLeng;
+					}
+					else fadeOutVol = 64;
+
+					Ch.volTargetInst = volEnv.value;
+					//Ch.volTarget = fadeOutVol*globalVol/64*realVol/64;
+					//Ch.volTarget = fadeOutVol*volEnv.value/64*globalVol/64*realVol/64;
+					volTarget = fadeOutVol * globalVol / 64 * realVol / 64;
+				}
+				else
+				{
+					Ch.volTargetInst = 64;
+					if (Ch.fading) Ch.volume = 0;
+				}
+				Ch.volTargetInst <<= INT_ACC_RAMPING;
+
+				volTarget = MAX(MIN(volTarget, 64), 0);
+
+				//Panning
+				Ch.pan = MAX(MIN(Ch.pan, 255), 0);
+				if (Inst.panType & 0x01)
+				{
+					EnvInfo panEnv = CalcEnvelope(Inst, Ch.panEnvelope, true);
+					if (Inst.panType & 0x02)
+					{
+						if (Ch.panEnvelope != Inst.panEnvelops[Inst.panSustainPt * 2] || Ch.fading)
+							Ch.panEnvelope ++;
+					}
+					else Ch.panEnvelope ++;
+
+					if (Inst.panType & 0x04)
+					{
+						if (Ch.panEnvelope >= Inst.panEnvelops[Inst.panLoopEnd * 2])
+							Ch.panEnvelope = Inst.panEnvelops[Inst.panLoopStart * 2];
+					}
+
+					if (Ch.panEnvelope >= panEnv.maxPoint)
+						Ch.panEnvelope = panEnv.maxPoint;
+
+					Ch.panFinal = Ch.pan + (((panEnv.value - 32) * (128 - abs(Ch.pan - 128))) >> 5);
+				}
+				else Ch.panFinal = Ch.pan;
+				Ch.panFinal = MAX(MIN(Ch.panFinal, 255), 0);
+
+				//sample info
+				Sample curSample = samples[Ch.samplePlaying];
+				Ch.data = curSample.data;
+				Ch.loopType = curSample.type;
+
+				Ch.is16Bit = curSample.is16Bit;
+				Ch.smpLeng = curSample.length;
+				Ch.loopStart = curSample.loopStart;
+				Ch.loopLeng = curSample.loopLength;
+				Ch.loopEnd = Ch.loopStart + Ch.loopLeng;
+
+				if (Ch.loopType >= 2)
+				{
+					Ch.loopEnd += Ch.loopLeng;
+					Ch.loopLeng <<= 1;
+				}
+				if (!Ch.loopType) Ch.loop = 0;
+
+				//Set volume ramping
+				double volRampSmps = samplePerTick;
+				double instVolRampSmps = samplePerTick;
+				if (Ch.LxxEffect)
+				{
+					instVolRampSmps = VOLRAMP_NEW_INSTR;
+					Ch.LxxEffect = false;
+				}
+
+				if (((Ch.volCmd & 0xF0) >= 0x10 &&
+					(Ch.volCmd & 0xF0) <= 0x50) ||
+					(Ch.volCmd & 0xF0) == 0xC0 ||
+					Ch.effect == 12 || Ch.effect == 8 ||
+					(Ch.effect == 0x14 && (Ch.parameter & 0xF0) == 0xC0))
+					volRampSmps = VOLRAMP_VOLSET_SAMPLES;
+
+				if (!(Inst.volType & 0x01) && Ch.fading)
+				{
+					volTarget = 0;
+					Ch.fading = false;
+					volRampSmps = VOLRAMP_VOLSET_SAMPLES;
+				}
+
+				if (Ch.instTrig)
+				{
+					//Ch.VolFinal = Ch.volTarget;
+					//Ch.volFinalInst = Ch.volTargetInst;
+
+					volRampSmps = VOLRAMP_VOLSET_SAMPLES;
+					instVolRampSmps = VOLRAMP_NEW_INSTR;
+
+					//Ch.volFinalL = Ch.volFinalR = 0;
+					Ch.instTrig = false;
+				}
+				//else if (Ch.effect == 0xA)
+				//    volRampSmps = samplePerTick;
+
+				if (stereo)
+				{
+					if (!panMode)
+					{
+						//https://modarchive.org/forums/index.php?topic=3517.0
+						//FT2 square root panning law
+						Ch.volTargetL = (int32_t)(volTarget * sqrt((256 - Ch.panFinal) / 256.0) / .707) << INT_ACC_RAMPING;
+						Ch.volTargetR = (int32_t)(volTarget * sqrt(Ch.panFinal / 256.0) / .707) << INT_ACC_RAMPING;
+					}
+					else
+					{
+						//Linear panning
+						if (Ch.panFinal > 128)
+						{
+							Ch.volTargetL = volTarget * (256 - Ch.panFinal) / 128.0;
+							Ch.volTargetR = volTarget;
+						}
+						else
+						{
+							Ch.volTargetL = volTarget;
+							Ch.volTargetR = volTarget * (Ch.panFinal / 128.0);
+						}
+						Ch.volTargetL <<= INT_ACC_RAMPING;
+						Ch.volTargetR <<= INT_ACC_RAMPING;
+					}
+				}
+				else Ch.volTargetL = Ch.volTargetR = (volTarget << INT_ACC_RAMPING);
+
+				Ch.volRampSpdL = (Ch.volTargetL - Ch.volFinalL) / volRampSmps;
+				Ch.volRampSpdR = (Ch.volTargetR - Ch.volFinalR) / volRampSmps;
+				Ch.volRampSpdInst = (Ch.volTargetInst - Ch.volFinalInst) / instVolRampSmps;
+
+				if (Ch.volRampSpdL == 0) Ch.volFinalL = Ch.volTargetL;
+				if (Ch.volRampSpdR == 0) Ch.volFinalR = Ch.volTargetR;
+				if (Ch.volRampSpdInst == 0) Ch.volFinalInst = Ch.volTargetInst;
+			}
+			else Ch.volFinalL = Ch.volFinalR = 0;
+			i ++;
+		}
+	}
+
+	static void ChkEffectRow(Note thisNote, uint8_t i, bool byPassEffectCol, bool RxxRetrig = false)
+	{
+		uint8_t volCmd = thisNote.volCmd;
+		uint8_t volPara = thisNote.volCmd & 0x0F;
+		uint8_t effect = thisNote.effect;
+		uint8_t para = thisNote.parameter;
+		uint8_t subEffect = para & 0xF0;
+		uint8_t subPara = para & 0x0F;
+
+		//if ((effect != 0) || (para == 0))   //0XX
+		//    Ch.NoteOfs = 0;
+
+		if (!byPassEffectCol)
+		{
+			//effect column
+			switch (effect)
+			{
+			default:
+				break;
+			case 1: //1xx
+				if (para != 0) Ch.slideUpSpd = para;
+				break;
+			case 2: //2xx
+				if (para != 0) Ch.slideDnSpd = para;
+				break;
+			case 3: //3xx
+				if (para != 0) Ch.slideSpd = para;
+				break;
+			case 4: //4xx
+				if ((para & 0xF) > 0)
+					Ch.vibratoPara = (Ch.vibratoPara & 0xF0) + (para & 0xF);
+				if (((para >> 4) & 0xF) > 0)
+					Ch.vibratoPara = (Ch.vibratoPara & 0xF) + (para & 0xF0);
+				break;
+			case 7: //7xx
+				if ((para & 0xF) > 0)
+					Ch.tremoloPara = (Ch.tremoloPara & 0xF0) + (para & 0xF);
+				if (((para >> 4) & 0xF) > 0)
+					Ch.tremoloPara = (Ch.tremoloPara & 0xF) + (para & 0xF0);
+				break;
+			case 8: //8xx
+				Ch.pan = para;
+				break;
+				//case 9: //9xx
+				//    //if (Ch.active) Ch.pos = para*256;
+				//    if (thisNote.note < 97) Ch.pos = para*256;
+				//    break;
+			case 5: //5xx
+			case 6: //6xx
+			case 10:    //Axx
+				if (para != 0)
+				{
+					if (para & 0xF) Ch.volSlideSpd = -(para & 0xF);
+					else if (para & 0xF0) Ch.volSlideSpd = (para >> 4) & 0xF;
+				}
+				break;
+			case 11:    //Bxx
+				patJump = para;
+				break;
+			case 12:    //Cxx
+				Ch.volume = para;
+				break;
+			case 13:    //Dxx
+				patBreak = (para >> 4) * 10 + (para & 0xF);
+				break;
+			case 14:    //Exx
+				switch (subEffect)
+				{
+				case 0x10:  //E1x
+					if (subPara != 0) Ch.fineProtaUp = subPara;
+					if (Ch.period > 1) Ch.period -= Ch.fineProtaUp * 4;
+					break;
+				case 0x20:  //E2x
+					if (subPara != 0) Ch.fineProtaDn = subPara;
+					if (Ch.period < 7680) Ch.period += Ch.fineProtaDn * 4;
+					break;
+				case 0x30:  //E3x
+					break;
+				case 0x40:  //E4x
+					break;
+				case 0x50:  //E5x
+					Ch.fineTune = fineTuneTable[(useAmigaFreqTable ? 0 : 16) + subPara];
+					break;
+				case 0x60:  //E6x
+					if (subPara == 0 && repeatPos < curRow) {
+						repeatPos = curRow;
+						patRepeat = 0;
+					}
+					else if (patRepeat < subPara) {
+						patRepeat ++;
+						repeatTo = repeatPos;
+					}
+					break;
+				case 0x70:  //E7x
+					break;
+				case 0x80:  //E8x
+					break;
+				case 0xA0:  //EAx
+					if (subPara != 0) Ch.fineVolUp = subPara;
+					Ch.volume += Ch.fineVolUp;
+					break;
+				case 0xB0:  //EBx
+					if (subPara != 0) Ch.fineVolDn = subPara;
+					Ch.volume -= Ch.fineVolDn;
+					break;
+				case 0x90:  //E9x
+				case 0xC0:  //ECx
+					Ch.delay = subPara - 1;
+					break;
+				case 0xD0:  //EDx
+					Ch.delay = subPara;
+					break;
+				case 0xE0:
+					patDelay = subPara;
+					break;
+				}
+				break;
+			case 15:    //Fxx
+				if (!ignoreF00)
+				{
+					if (para < 32 && para != 0) speed = para;
+					else tempo = para;
+				}
+				else if (para != 0)
+				{
+					if (para < 32) speed = para;
+					else tempo = para;
+				}
+				break;
+			case 16:    //Gxx
+				globalVol = MAX(MIN(para, 64), 0);
+				break;
+			case 17:    //Hxx
+				if (para != 0)
+				{
+					if (para & 0xF) Ch.globalVolSlideSpd = -(para & 0xF);
+					else if (para & 0xF0) Ch.globalVolSlideSpd = (para >> 4) & 0xF;
+				}
+				break;
+			case 20:    //Kxx
+				if (para == 0) Ch.keyOff = Ch.fading = true;
+				else Ch.delay = para;
+				break;
+			case 21:    //Lxx
+				if (Ch.instrument && Ch.instrument <= numOfInstruments)
+				{
+					if (instruments[Ch.instrument - 1].volType & 0x02)
+						Ch.panEnvelope = para;
+
+					Ch.volEnvelope = para;
+					Ch.LxxEffect = true;
+					Ch.active = true;
+				}
+				break;
+			case 25:    //Pxx
+				if (para != 0)
+				{
+					if (para & 0xF) Ch.panSlideSpd = -(para & 0xF);
+					else if (para & 0xF0) Ch.panSlideSpd = (para >> 4) & 0xF;
+				}
+				break;
+			case 27:    //Rxx
+				//Ch.RxxCounter = 1;
+				//Ch.delay = subPara;
+				//if ((para & 0xF0) != 0) Ch.retrigPara = (para >> 4) & 0xF;
+				if (((para >> 4) & 0xF) > 0)
+					Ch.retrigPara = (Ch.retrigPara & 0xF) + (para & 0xF0);
+				/*
+				if ((Ch.retrigPara < 6) || (Ch.retrigPara > 7 && Ch.retrigPara < 14))
+					Ch.volume += RxxVolSlideTable[Ch.retrigPara];
+				else
+				{
+					switch (Ch.retrigPara)
+					{
+						case 6:
+							Ch.volume = (Ch.volume << 1) / 3;
+							break;
+						case 7:
+							Ch.volume >>= 1;
+							break;
+						case 14:
+							Ch.volume = (Ch.volume * 3) >> 1;
+							break;
+						case 15:
+							Ch.volume <<= 1;
+							break;
+					}
+				}
+				*/
+				break;
+			case 29:    //Txx
+				if (para != 0) Ch.tremorPara = para;
+				break;
+			case 33:    //Xxx
+				if (subEffect == 0x10)  //X1x
+				{
+					if (subPara != 0) Ch.EFProtaUp = subPara;
+					Ch.period -= Ch.EFProtaUp;
+				}
+				else if (subEffect == 0x20) //X2x
+				{
+					if (subPara != 0) Ch.EFProtaDn = subPara;
+					Ch.period += Ch.EFProtaDn;
+				}
+				break;
+			}
+		}
+
+		//volume column effects
+		switch (volCmd & 0xF0)
+		{
+		case 0x80:  //Dx
+			Ch.volume -= volPara;
+			break;
+		case 0x90:  //Ux
+			Ch.volume += volPara;
+			break;
+		case 0xA0:  //Sx
+			Ch.vibratoPara = (Ch.vibratoPara & 0xF) + ((volPara << 4) & 0xF0);
+			break;
+		case 0xB0:  //Vx
+			if (volPara != 0)
+				Ch.vibratoPara = (Ch.vibratoPara & 0xF0) + volPara;
+			break;
+		case 0xC0:  //Px
+			Ch.pan = volPara * 17;
+			break;
+		case 0xF0:  //Mx
+			if (volPara != 0) Ch.slideSpd = ((volPara << 4) & 0xF0) + volPara;
+			break;
+		default:    //Vxx
+			if (volCmd >= 0x10 && volCmd <= 0x50 && !RxxRetrig)
+				Ch.lastVol = Ch.volume = volCmd - 0x10;
+			break;
+		}
+	}
+
+	static void ChkNote(Note thisNote, uint8_t i, bool byPassDelayChk, bool RxxRetrig = false)
+	{
+		/*
+		note thisNote;
+		thisNote.note = Ch.lastNote;
+		thisNote.instrument = Ch.lastInstrument;
+		thisNote.volCmd = Ch.volCmd | Ch.volPara;
+		thisNote.effect = Ch.effect;
+		thisNote.parameter = Ch.parameter;
+		*/
+
+		//uint8_t note = thisNote.note;
+		//if (thisNote.note > 96 || thisNote.note == 0) note = Ch.note;
+		//Ch.note = note;
+
+		Note thisNoteOrig = thisNote;
+		if (byPassDelayChk)
+		{
+			thisNote.note = Ch.lastNote;
+			thisNote.instrument = Ch.lastInstrument;
+			thisNote.volCmd = Ch.volCmd;
+			thisNote.effect = Ch.effect;
+			thisNote.parameter = Ch.parameter;
+		}
+
+		if ((Ch.noteArpeggio <= 119 && Ch.noteArpeggio > 0) || Ch.periodOfs != 0/*&& (Ch.effect != 0 || Ch.parameter == 0)*/)
+		{
+			Ch.periodOfs = 0;
+			Ch.noteArpeggio = 0;
+			if (useAmigaFreqTable)
+				Ch.period = Ch.targetPeriod;
+		}
+
+		bool porta = (thisNote.effect == 3 || thisNote.effect == 5 || ((thisNote.volCmd & 0xF0) == 0xF0));
+
+		bool hasNoteDelay = (thisNote.effect == 14 && ((thisNote.parameter & 0xF0) >> 4) == 13 && (thisNote.parameter & 0x0F) != 0);
+
+		if (thisNote.effect != 4 && thisNote.effect != 6 && !Ch.volVibrato) Ch.vibratoPos = 0;
+
+		if (!hasNoteDelay || byPassDelayChk)
+		{
+			//Reference: https://github.com/milkytracker/MilkyTracker/blob/master/src/milkyplay/PlayerSTD.cpp - PlayerSTD::progressRow()
+
+			Ch.delay = -1;
+
+			int8_t noteNum = thisNote.note;
+			uint8_t instNum = thisNote.instrument;
+			//bool validNote = true;
+
+			//if (instNum && instNum <= numOfInstruments)
+			//{
+			//    Ch.instrument = instNum;
+			//}
+
+			uint8_t oldInst = Ch.instrument;
+			int16_t oldSamp = Ch.sample;
+
+			bool invalidInstr = true;
+			if (instNum && instNum <= numOfInstruments && noteNum < 97)
+			{
+				if (instruments[instNum - 1].sampleNum > 0)
+				{
+					Ch.nextInstrument = instNum;
+					invalidInstr = false;
+				}
+			}
+
+			if (instNum && invalidInstr) Ch.nextInstrument = 255;
+
+			bool validNote = true;
+			bool trigByNote = false;
+			if (noteNum && noteNum < 97)
+			{
+				/*
+				if (instNum && instNum <= numOfInstruments)
+				{
+					Ch.instrument = instNum;
+				}
+				else instNum = 0;
+
+				bool invalidInstr = true;
+				if (Ch.instrument && Ch.instrument <= numOfInstruments)
+				{
+					if (instruments[Ch.instrument - 1].sampleNum > 0)
+						invalidInstr = false;
+				}
+				*/
+
+				if (Ch.nextInstrument == 255)
+				{
+					instNum = 0;
+					Ch.active = false;
+					Ch.volume = 0;
+					Ch.sample = -1;
+					Ch.instrument = 0;
+				}
+				else Ch.instrument = Ch.nextInstrument;
+
+				if (Ch.nextInstrument && Ch.nextInstrument <= numOfInstruments)
+				{
+					Ch.sample = instruments[Ch.nextInstrument - 1].sampleMap[noteNum - 1];
+
+					if (Ch.sample != -1 && !porta)
+					{
+						Sample smp = samples[Ch.sample];
+						int8_t relNote = smp.relNote;
+						int8_t finalNote = noteNum + relNote;
+
+						if (finalNote >= 1 && finalNote <= 119)
+						{
+							Ch.fineTune = smp.fineTune;
+							Ch.relNote = relNote;
+						}
+						else
+						{
+							noteNum = Ch.note;
+							validNote = false;
+						}
+					}
+
+					if (validNote)
+					{
+						Ch.note = noteNum;
+
+						CalcPeriod(i);
+
+						if (!porta)
+						{
+							Ch.period = Ch.targetPeriod;
+							Ch.samplePlaying = Ch.sample;
+							Ch.autoVibPos = Ch.autoVibSweep = 0;
+							Ch.loop = 0;
+
+							Ch.startCount = 0;
+
+							if (thisNote.effect == 9) Ch.pos = thisNote.parameter << 8;
+							else Ch.pos = 0;
+
+							if (Ch.pos > samples[Ch.samplePlaying].length) Ch.pos = samples[Ch.samplePlaying].length;
+
+							//NoteTrig = true;
+							if (!Ch.active && !instNum)
+							{
+								trigByNote = true;
+								goto TrigInst;
+							}
+						}
+					}
+				}
+			}
+
+			//FT2 bug emulation
+			if ((porta || !validNote) && instNum)
+			{
+				instNum = Ch.instrument = oldInst;
+				Ch.sample = oldSamp;
+			}
+
+			if (instNum && Ch.sample != -1)
+			{
+			TrigInst:
+				if (!RxxRetrig && thisNoteOrig.instrument)
+				{
+					//Ch.volFinalL = Ch.volFinalR = 0;
+					Ch.volume = trigByNote ? Ch.lastVol : Ch.lastVol = samples[Ch.samplePlaying].volume;
+					Ch.pan = samples[Ch.samplePlaying].pan;
+					Ch.tremorMute = false;
+					Ch.tremorTick = 0;
+					//Ch.autoVibPos = Ch.autoVibSweep = 0;
+					Ch.tremorPos = 0;
+				}
+				Ch.volVibrato = false;
+
+				Ch.fadeTick = Ch.volEnvelope = Ch.panEnvelope = 0;
+
+				Ch.instTrig = Ch.active = true;
+				Ch.keyOff = Ch.fading = false;
+			}
+
+			if (noteNum == 97)
+				Ch.fading = true;
+
+			ChkEffectRow(thisNote, i, byPassDelayChk, RxxRetrig);
+		}
+		else
+		{
+			Ch.delay = Ch.parameter & 0x0F;
+			if (porta)
+			{
+				Ch.period = Ch.targetPeriod;
+				if (Ch.samplePlaying != -1) CalcPeriod(i);
+			}
+		}
+	}
+
+	static void ChkEffectTick(uint8_t i, Note thisNote)
+	{
+		uint8_t volCmd = thisNote.volCmd;
+		uint8_t volPara = thisNote.volCmd & 0x0F;
+		uint8_t effect = thisNote.effect;
+		uint8_t para = thisNote.parameter;
+		uint8_t subEffect = para & 0xF0;
+		uint8_t subPara = para & 0x0F;
+
+		if (effect != 4 && effect != 6 && !Ch.volVibrato) Ch.vibratoPos = 0;
+		if (effect != 27) Ch.RxxCounter = 0;
+
+		uint8_t onTime, offTime;
+
+		//effect column
+		switch (effect)
+		{
+		case 1: //1xx
+			Ch.period -= Ch.slideUpSpd * 4;
+			break;
+		case 2: //2xx
+			Ch.period += Ch.slideDnSpd * 4;
+			break;
+		case 3: //3xx
+		PortaEffect:
+			if (Ch.period > Ch.targetPeriod)
+				Ch.period -= Ch.slideSpd * 4;
+			else if (Ch.period < Ch.targetPeriod)
+				Ch.period += Ch.slideSpd * 4;
+			if (abs(Ch.period - Ch.targetPeriod) < Ch.slideSpd * 4)
+				Ch.period = Ch.targetPeriod;
+			break;
+		case 4: //4xx
+		VibratoEffect:
+			Ch.vibratoAmp = Ch.vibratoPara & 0xF;
+			Ch.vibratoPos += (Ch.vibratoPara >> 4) & 0x0F;
+			break;
+		case 5: //5xx
+			Ch.volume += Ch.volSlideSpd;
+			goto PortaEffect;
+			break;
+		case 6: //6xx
+			Ch.volume += Ch.volSlideSpd;
+			goto VibratoEffect;
+			break;
+		case 7: //7xx
+			Ch.tremorAmp = Ch.tremoloPara & 0xF;
+			Ch.tremorPos += (Ch.tremoloPara >> 4) & 0x0F;
+			break;
+		case 8: //8xx
+			Ch.pan = para;
+			break;
+		case 10:    //Axx
+			Ch.volume += Ch.volSlideSpd;
+			break;
+		case 12:    //Cxx
+			Ch.volume = para;
+			break;
+		case 14:    //Exx
+			switch (subEffect)
+			{
+			case 0x90:  //E9x
+				if (Ch.delay <= 0 && subPara > 0)
+				{
+					ChkNote(thisNote, i, true);
+					Ch.delay = subPara;
+				}
+				break;
+			case 0xC0:  //ECx
+				if (Ch.delay <= 0)
+					Ch.volume = 0;
+				break;
+			case 0xD0:  //EDx
+				if (Ch.delay <= 1 && Ch.delay != -1 && !Ch.keyOff) ChkNote(thisNote, i, true);
+				break;
+			}
+			break;
+		case 17:    //Hxx
+			globalVol = MAX(MIN(globalVol + Ch.globalVolSlideSpd, 64), 0);
+			break;
+		case 20:    //Kxx
+			if (Ch.delay <= 0)
+			{
+				Ch.keyOff = Ch.fading = true;
+			}
+			break;
+		case 25:    //Pxx
+			Ch.pan += Ch.panSlideSpd;
+			break;
+		case 27:    //Rxx
+			Ch.RxxCounter ++;
+			if (Ch.RxxCounter >= (Ch.retrigPara & 0x0F) - 1)
+			{
+				ChkNote(thisNote, i, true, true);
+				if ((para & 0xF) > 0)
+					Ch.retrigPara = (Ch.retrigPara & 0xF0) + (para & 0xF);
+
+				uint8_t retrigVol = (Ch.retrigPara >> 4) & 0x0F;
+				if ((retrigVol < 6) || (retrigVol > 7 && retrigVol < 14))
+					Ch.volume += RxxVolSlideTable[retrigVol];
+				else
+				{
+					switch (retrigVol)
+					{
+					case 6:
+						Ch.volume = (Ch.volume + Ch.volume) / 3;
+						break;
+					case 7:
+						Ch.volume >>= 1;
+						break;
+					case 14:
+						Ch.volume = (Ch.volume * 3) >> 1;
+						break;
+					case 15:
+						Ch.volume <<= 1;
+						break;
+					}
+				}
+				Ch.RxxCounter = 0;
+			}
+			break;
+		case 29:    //Txx
+			Ch.tremorTick ++;
+			onTime = ((Ch.tremorPara >> 4) & 0xF) + 1;
+			offTime = (Ch.tremorPara & 0xF) + 1;
+			Ch.tremorMute = (Ch.tremorTick > onTime);
+			if (Ch.tremorTick >= onTime + offTime) Ch.tremorTick = 0;
+			break;
+		}
+
+		if (Ch.delay > -1) Ch.delay --;
+
+		//volume column effects
+		switch (volCmd & 0xF0)
+		{
+		case 0x60:  //Dx
+			Ch.volume -= volPara;
+			break;
+		case 0x70:  //Ux
+			Ch.volume += volPara;
+			break;
+		case 0xB0:  //Vx
+			Ch.vibratoAmp = Ch.vibratoPara & 0xF;
+			Ch.vibratoPos += (Ch.vibratoPara >> 4) & 0x0F;
+			Ch.volVibrato = true;
+			break;
+		case 0xD0:  //Lx
+			Ch.pan -= volPara;
+			break;
+		case 0xE0:  //Rx
+			Ch.pan += volPara;
+			break;
+		case 0xF0:  //Mx
+			if (Ch.period > Ch.targetPeriod)
+				Ch.period -= Ch.slideSpd * 4;
+			else if (Ch.period < Ch.targetPeriod)
+				Ch.period += Ch.slideSpd * 4;
+			if (abs(Ch.period - Ch.targetPeriod) < Ch.slideSpd * 4)
+				Ch.period = Ch.targetPeriod;
+			break;
+		}
+	}
+
+	static void NextRow()
+	{
+		if (patDelay <= 0)
+		{
+			curRow ++;
+			if (patBreak >= 0 && patJump >= 0)
+			{
+				curRow = patBreak;
+				curPos = patJump;
+				patRepeat = repeatPos = 0;
+				repeatTo = patBreak = patJump = -1;
+			}
+			if (patBreak >= 0)
+			{
+				curRow = patBreak;
+				patRepeat = repeatPos = 0;
+				patBreak = repeatTo = -1;
+				curPos ++;
+			}
+			if (patJump >= 0)
+			{
+				curPos = patJump;
+				curRow = patRepeat = repeatPos = 0;
+				repeatTo = patJump = -1;
+			}
+			if (repeatTo >= 0)
+			{
+				curRow = repeatTo;
+				repeatTo = -1;
+			}
+			if (curRow >= *(int16_t *)(patternData + patternAddr[orderTable[curPos]]))
+			{
+				//Pattern loop bug emulation
+				curRow = repeatPos > 0 ? repeatPos : 0;
+				patRepeat = repeatPos = 0;
+				repeatTo = -1;
+				curPos ++;
+			}
+			if (curPos >= songLength)
+			{
+				if (loop)
+					curPos = rstPos;
+				else
+				{
+					ResetModule();
+					return;
+				}
+			}
+
+			int i = 0;
+			while (i < numOfChannels)
+			{
+				Note ThisNote = GetNote(orderTable[curPos], curRow, i);
+
+				if (ThisNote.note != 0) Ch.lastNote = ThisNote.note;
+				if (ThisNote.instrument != 0) Ch.lastInstrument = ThisNote.instrument;
+				Ch.volCmd = ThisNote.volCmd;
+				Ch.volPara = ThisNote.volCmd & 0x0F;
+				Ch.effect = ThisNote.effect;
+				Ch.parameter = ThisNote.parameter;
+
+				ChkNote(ThisNote, i, false);
+				//if (Ch.delay > -1) Ch.delay -- ;
+
+				i ++;
+			}
+		}
+		else patDelay --;
+	}
+
+	static void NextTick()
+	{
+		int i = 0;
+		tick ++;
+
+		if (tick >= speed) {
+			tick = 0;
+			NextRow();
+			return;
+		}
+
+		if (curRow >= 0)
+		{
+			while (i < numOfChannels)
+			{
+				Note ThisNote = GetNote(orderTable[curPos], curRow, i);
+
+				ChkEffectTick(i, ThisNote);
+
+				i ++;
+			}
+		}
+	}
+
+	/*
+	static inline void MixAudioOld(int16_t *buffer, uint32_t pos)
+	{
+		int32_t outL = 0;
+		int32_t outR = 0;
+		double result = 0;
+
+		int i = 0;
+		while (i < numOfChannels)
+		{
+			if (Ch.active)
+			{
+				if (Ch.samplePlaying != -1 && Ch.samplePlaying < totalSampleNum)
+				{
+					int32_t chPos = Ch.pos;
+
+					if (Ch.startCount >= SMP_CHANGE_RAMP)
+					{
+						Ch.posL16 += Ch.delta;
+						chPos += Ch.posL16 >> INT_ACC;
+						Ch.posL16 &= INT_MASK;
+					}
+
+					//volume ramping
+					if (Ch.volFinalL != Ch.volTargetL)
+					{
+						if (abs(Ch.volFinalL - Ch.volTargetL) >= abs(Ch.volRampSpdL))
+							Ch.volFinalL += Ch.volRampSpdL;
+						else Ch.volFinalL = Ch.volTargetL;
+					}
+
+					if (Ch.volFinalR != Ch.volTargetR)
+					{
+						if (abs(Ch.volFinalR - Ch.volTargetR) >= abs(Ch.volRampSpdR))
+							Ch.volFinalR += Ch.volRampSpdR;
+						else Ch.volFinalR = Ch.volTargetR;
+					}
+
+					if (Ch.volFinalInst != Ch.volTargetInst)
+					{
+						if (abs(Ch.volFinalInst - Ch.volTargetInst) >= abs(Ch.volRampSpdInst))
+							Ch.volFinalInst += Ch.volRampSpdInst;
+						else Ch.volFinalInst = Ch.volTargetInst;
+					}
+
+					//Looping
+					if (Ch.loopType)
+					{
+						if (chPos < Ch.loopStart)
+							Ch.loop = 0;
+						else if (chPos >= Ch.loopEnd)
+						{
+							chPos = Ch.loopStart + (chPos - Ch.loopStart) % Ch.loopLeng;
+							Ch.loop = 1;
+						}
+					}
+					else if (chPos >= Ch.smpLeng)
+					{
+						Ch.active = false;
+						Ch.endSmp = Ch.is16Bit ? *(int16_t *)(Ch.data + ((Ch.smpLeng - 1) << 1)) : (int16_t)(Ch.data[Ch.smpLeng - 1] << 8);
+						Ch.samplePlaying = -1;
+						Ch.endCount = 0;
+					}
+
+					Ch.pos = chPos;
+
+					//Don't mix when there is no sample playing or the channel is muted
+					if (Ch.muted || Ch.samplePlaying == -1) goto Continue;
+
+					if (Ch.startCount >= SMP_CHANGE_RAMP)
+					{
+						//interpolation
+						if (interpolation)
+						{
+							int32_t prevPos = chPos;
+
+							if (chPos > 0) prevPos -- ;
+
+							if (Ch.loop == 1 && chPos <= Ch.loopStart)
+								prevPos = Ch.loopEnd - 1;
+
+							int16_t prevData;
+							int32_t dy;
+
+							uint16_t ix = Ch.posL16 >> 1;
+
+							if (Ch.is16Bit)
+							{
+								prevData = *(int16_t *)(Ch.data + (prevPos << 1));
+								dy = *(int16_t *)(Ch.data + (chPos << 1)) - prevData;
+							}
+							else
+							{
+								prevData = Ch.data[prevPos] << 8;
+								dy = (Ch.data[chPos] << 8) - prevData;
+							}
+
+							result = (prevData + ((dy * ix) >> INT_ACC_INTERPOL));
+						}
+						else
+						{
+							if (Ch.is16Bit) result = *(int16_t *)(Ch.data + (chPos << 1));
+							else result = (int16_t)(Ch.data[chPos] << 8);
+						}
+
+						if (Ch.startCount < SMP_CHANGE_RAMP + SMP_CHANGE_RAMP)
+						{
+							result = result * (Ch.startCount - SMP_CHANGE_RAMP) / SMP_CHANGE_RAMP;
+							Ch.startCount ++ ;
+						}
+						Ch.prevSmp = result;
+					}
+					else
+					{
+						result = Ch.prevSmp * (SMP_CHANGE_RAMP - Ch.startCount) / SMP_CHANGE_RAMP;
+						Ch.startCount ++ ;
+					}
+
+					result *= amplifierFinal * masterVolume * Ch.volFinalInst / (64.0 * TOINT_SCL_RAMPING);
+
+					outL += result * (Ch.volFinalL >> INT_ACC_RAMPING);
+					outR += result * (Ch.volFinalR >> INT_ACC_RAMPING);
+				}
+				else goto NotActived;
+			}
+			else
+			{
+				NotActived:
+
+				Ch.pos = Ch.posL16 = 0;
+				Ch.prevSmp = 0;
+				Ch.startCount = 0;
+			}
+
+			Continue:
+
+			if (Ch.endCount < SMP_CHANGE_RAMP)
+			{
+				result = Ch.endSmp * (SMP_CHANGE_RAMP - Ch.endCount) / SMP_CHANGE_RAMP;
+				Ch.endCount ++ ;
+
+				result *= amplifierFinal * masterVolume * Ch.volFinalInst / (64.0 * TOINT_SCL_RAMPING);
+
+				outL += result * (Ch.volFinalL >> INT_ACC_RAMPING);
+				outR += result * (Ch.volFinalR >> INT_ACC_RAMPING);
+			}
+
+			i ++ ;
+		}
+
+		buffer[pos << 1] = outL >> 16;
+		buffer[(pos << 1) + 1] = outR >> 16;
+	}
+	*/
 
 #define MIXPREFIX\
-    int k = 0;\
-    while (k < Samples)\
-    {\
-        int32_t OutL = 0;\
-        int32_t OutR = 0;\
-        double Result = 0;\
+	int k = 0;\
+	while (k < samples)\
+	{\
+		int32_t outL = 0;\
+		int32_t outR = 0;\
+		double result = 0;\
 \
-        if (Ch.Active)\
-        {\
-            if (Ch.SmpPlaying != -1 && Ch.SmpPlaying < TotalSampleNum)\
-            {\
-                int32_t ChPos = Ch.Pos;\
+		if (Ch.active)\
+		{\
+			if (Ch.samplePlaying != -1 && Ch.samplePlaying < totalSampleNum)\
+			{\
+				int32_t chPos = Ch.pos;\
 \
-                if (Ch.StartCount >= SMP_CHANGE_RAMP)\
-                {\
-                    Ch.PosL16 += Ch.Delta;\
-                    ChPos += Ch.PosL16 >> INT_ACC;\
-                    Ch.PosL16 &= INT_MASK;\
-                }\
+				if (Ch.startCount >= SMP_CHANGE_RAMP)\
+				{\
+					Ch.posL16 += Ch.delta;\
+					chPos += Ch.posL16 >> INT_ACC;\
+					Ch.posL16 &= INT_MASK;\
+				}\
 \
-                if (Ch.VolFinalL != Ch.VolTargetL)\
-                {\
-                    if (abs(Ch.VolFinalL - Ch.VolTargetL) >= abs(Ch.VolRampSpdL))\
-                        Ch.VolFinalL += Ch.VolRampSpdL;\
-                    else Ch.VolFinalL = Ch.VolTargetL;\
-                }\
+				if (Ch.volFinalL != Ch.volTargetL)\
+				{\
+					if (abs(Ch.volFinalL - Ch.volTargetL) >= abs(Ch.volRampSpdL))\
+						Ch.volFinalL += Ch.volRampSpdL;\
+					else Ch.volFinalL = Ch.volTargetL;\
+				}\
 \
-                if (Ch.VolFinalR != Ch.VolTargetR)\
-                {\
-                    if (abs(Ch.VolFinalR - Ch.VolTargetR) >= abs(Ch.VolRampSpdR))\
-                        Ch.VolFinalR += Ch.VolRampSpdR;\
-                    else Ch.VolFinalR = Ch.VolTargetR;\
-                }\
+				if (Ch.volFinalR != Ch.volTargetR)\
+				{\
+					if (abs(Ch.volFinalR - Ch.volTargetR) >= abs(Ch.volRampSpdR))\
+						Ch.volFinalR += Ch.volRampSpdR;\
+					else Ch.volFinalR = Ch.volTargetR;\
+				}\
 \
-                if (Ch.VolFinalInst != Ch.VolTargetInst)\
-                {\
-                    if (abs(Ch.VolFinalInst - Ch.VolTargetInst) >= abs(Ch.VolRampSpdInst))\
-                        Ch.VolFinalInst += Ch.VolRampSpdInst;\
-                    else Ch.VolFinalInst = Ch.VolTargetInst;\
-                }
+				if (Ch.volFinalInst != Ch.volTargetInst)\
+				{\
+					if (abs(Ch.volFinalInst - Ch.volTargetInst) >= abs(Ch.volRampSpdInst))\
+						Ch.volFinalInst += Ch.volRampSpdInst;\
+					else Ch.volFinalInst = Ch.volTargetInst;\
+				}
 
 #define MIXNOLOOP\
-    if (ChPos >= Ch.SmpLeng)\
-    {\
-        Ch.Active = false;\
-        Ch.EndSmp = Ch.Is16Bit ? *(int16_t *)(Ch.Data + ((Ch.SmpLeng - 1) << 1)) : (int16_t)(Ch.Data[Ch.SmpLeng - 1] << 8);\
-        Ch.SmpPlaying = -1;\
-        Ch.EndCount = 0;\
-    }\
-    Ch.Pos = ChPos;
+	if (chPos >= Ch.smpLeng)\
+	{\
+		Ch.active = false;\
+		Ch.endSmp = Ch.is16Bit ? *(int16_t *)(Ch.data + ((Ch.smpLeng - 1) << 1)) : (int16_t)(Ch.data[Ch.smpLeng - 1] << 8);\
+		Ch.samplePlaying = -1;\
+		Ch.endCount = 0;\
+	}\
+	Ch.pos = chPos;
 
 #define MIXLOOP\
-    if (ChPos < Ch.LoopStart)\
-        Ch.Loop = 0;\
-    else if (ChPos >= Ch.LoopEnd)\
-    {\
-        ChPos = Ch.LoopStart + (ChPos - Ch.LoopStart) % Ch.LoopLeng;\
-        Ch.Loop = 1;\
-    }\
-    Ch.Pos = ChPos;
+	if (chPos < Ch.loopStart)\
+		Ch.loop = 0;\
+	else if (chPos >= Ch.loopEnd)\
+	{\
+		chPos = Ch.loopStart + (chPos - Ch.loopStart) % Ch.loopLeng;\
+		Ch.loop = 1;\
+	}\
+	Ch.pos = chPos;
 
 #define MIXPART1(A)\
-    if (Ch.Muted || Ch.SmpPlaying == -1) goto A;\
+	if (Ch.muted || Ch.samplePlaying == -1) goto A;\
 \
-    if (Ch.StartCount >= SMP_CHANGE_RAMP)\
-    {
+	if (Ch.startCount >= SMP_CHANGE_RAMP)\
+	{
 
 #define MIXINTERPOLINIT\
-    int32_t PrevPos = ChPos;\
+	int32_t prevPos = chPos;\
 \
-    if (ChPos > 0) PrevPos -- ;\
+	if (chPos > 0) prevPos -- ;\
 \
-    if (Ch.Loop == 1 && ChPos <= Ch.LoopStart)\
-        PrevPos = Ch.LoopEnd - 1;\
+	if (Ch.loop == 1 && chPos <= Ch.loopStart)\
+		prevPos = Ch.loopEnd - 1;\
 \
-    int16_t PrevData;\
-    int32_t dy;\
+	int16_t prevData;\
+	int32_t dy;\
 \
-    uint16_t ix = Ch.PosL16 >> 1;
+	uint16_t ix = Ch.posL16 >> 1;
 
 #define MIXINTERPOL16BIT\
-    PrevData = *(int16_t *)(Ch.Data + (PrevPos << 1));\
-    dy = *(int16_t *)(Ch.Data + (ChPos << 1)) - PrevData;\
-    Result = (PrevData + ((dy * ix) >> INT_ACC_INTERPOL));
+	prevData = *(int16_t *)(Ch.data + (prevPos << 1));\
+	dy = *(int16_t *)(Ch.data + (chPos << 1)) - prevData;\
+	result = (prevData + ((dy * ix) >> INT_ACC_INTERPOL));
 
 #define MIXINTERPOL8BIT\
-    PrevData = Ch.Data[PrevPos] << 8;\
-    dy = (Ch.Data[ChPos] << 8) - PrevData;\
-    Result = (PrevData + ((dy * ix) >> INT_ACC_INTERPOL));
+	prevData = Ch.data[prevPos] << 8;\
+	dy = (Ch.data[chPos] << 8) - prevData;\
+	result = (prevData + ((dy * ix) >> INT_ACC_INTERPOL));
 
 #define MIXNEAREST16BIT\
-    Result = *(int16_t *)(Ch.Data + (ChPos << 1));
+	result = *(int16_t *)(Ch.data + (chPos << 1));
 
 #define MIXNEAREST8BIT\
-    Result = (int16_t)(Ch.Data[ChPos] << 8);
+	result = (int16_t)(Ch.data[chPos] << 8);
 
 #define MIXSUFFIX(A,B)\
-                    if (Ch.StartCount < SMP_CHANGE_RAMP + SMP_CHANGE_RAMP)\
-                    {\
-                        Result = Result * (Ch.StartCount - SMP_CHANGE_RAMP) / SMP_CHANGE_RAMP;\
-                        Ch.StartCount ++ ;\
-                    }\
-                    Ch.PrevSmp = Result;\
-                }\
-                else\
-                {\
-                    Result = Ch.PrevSmp * (SMP_CHANGE_RAMP - Ch.StartCount) / SMP_CHANGE_RAMP;\
-                    Ch.StartCount ++ ;\
-                }\
+					if (Ch.startCount < SMP_CHANGE_RAMP + SMP_CHANGE_RAMP)\
+					{\
+						result = result * (Ch.startCount - SMP_CHANGE_RAMP) / SMP_CHANGE_RAMP;\
+						Ch.startCount ++ ;\
+					}\
+					Ch.prevSmp = result;\
+				}\
+				else\
+				{\
+					result = Ch.prevSmp * (SMP_CHANGE_RAMP - Ch.startCount) / SMP_CHANGE_RAMP;\
+					Ch.startCount ++ ;\
+				}\
 \
-                Result *= AmpFinal * MasterVol * Ch.VolFinalInst / (64.0 * TOINT_SCL_RAMPING);\
+				result *= amplifierFinal * masterVolume * Ch.volFinalInst / (64.0 * TOINT_SCL_RAMPING);\
 \
-                OutL = Result * (Ch.VolFinalL >> INT_ACC_RAMPING);\
-                OutR = Result * (Ch.VolFinalR >> INT_ACC_RAMPING);\
-            }\
-            else goto B;\
-        }\
-        else\
-        {\
-            B:\
+				outL = result * (Ch.volFinalL >> INT_ACC_RAMPING);\
+				outR = result * (Ch.volFinalR >> INT_ACC_RAMPING);\
+			}\
+			else goto B;\
+		}\
+		else\
+		{\
+			B:\
 \
-            Ch.Pos = Ch.PosL16 = 0;\
-            Ch.PrevSmp = 0;\
-            Ch.StartCount = 0;\
-        }\
+			Ch.pos = Ch.posL16 = 0;\
+			Ch.prevSmp = 0;\
+			Ch.startCount = 0;\
+		}\
 \
-        A:\
+		A:\
 \
-        if (Ch.EndCount < SMP_CHANGE_RAMP)\
-        {\
-            Result = Ch.EndSmp * (SMP_CHANGE_RAMP - Ch.EndCount) / SMP_CHANGE_RAMP;\
-            Ch.EndCount ++ ;\
+		if (Ch.endCount < SMP_CHANGE_RAMP)\
+		{\
+			result = Ch.endSmp * (SMP_CHANGE_RAMP - Ch.endCount) / SMP_CHANGE_RAMP;\
+			Ch.endCount ++ ;\
 \
-            Result *= AmpFinal * MasterVol * Ch.VolFinalInst / (64.0 * TOINT_SCL_RAMPING);\
+			result *= amplifierFinal * masterVolume * Ch.volFinalInst / (64.0 * TOINT_SCL_RAMPING);\
 \
-            OutL = Result * (Ch.VolFinalL >> INT_ACC_RAMPING);\
-            OutR = Result * (Ch.VolFinalR >> INT_ACC_RAMPING);\
-        }\
-        else if (!Ch.Active) break;\
+			outL = result * (Ch.volFinalL >> INT_ACC_RAMPING);\
+			outR = result * (Ch.volFinalR >> INT_ACC_RAMPING);\
+		}\
+		else if (!Ch.active) break;\
 \
-        Buffer[PosFinal++] += OutL >> 16;\
-        Buffer[PosFinal++] += OutR >> 16;\
+		buffer[posFinal++] += outL >> 16;\
+		buffer[posFinal++] += outR >> 16;\
 \
-        k ++ ;\
-    }
+		k ++ ;\
+	}
 
 
-    static inline void MixAudio(int16_t *Buffer, uint32_t Pos, int32_t Samples)
-    {
-        int i = 0;
-        while (i < NumOfChannels)
-        {
-            int32_t PosFinal = Pos << 1;
+	static inline void MixAudio(int16_t *buffer, uint32_t pos, int32_t samples)
+	{
+		int i = 0;
+		while (i < numOfChannels)
+		{
+			int32_t posFinal = pos << 1;
 
-            if (!Ch.LoopType)
-            {
-                if (Ch.Is16Bit)
-                {
-                    if (Interpolation)
-                    {
-                        MIXPREFIX
+			if (!Ch.loopType)
+			{
+				if (Ch.is16Bit)
+				{
+					if (interpolation)
+					{
+						MIXPREFIX
 
-                        MIXNOLOOP
+							MIXNOLOOP
 
-                        MIXPART1(C1)
+							MIXPART1(C1)
 
-                        MIXINTERPOLINIT
+							MIXINTERPOLINIT
 
-                        MIXINTERPOL16BIT
+							MIXINTERPOL16BIT
 
-                        MIXSUFFIX(C1,N1)
-                    }
-                    else
-                    {
-                        MIXPREFIX
+							MIXSUFFIX(C1, N1)
+					}
+					else
+					{
+						MIXPREFIX
 
-                        MIXNOLOOP
+							MIXNOLOOP
 
-                        MIXPART1(C2)
+							MIXPART1(C2)
 
-                        MIXNEAREST16BIT
+							MIXNEAREST16BIT
 
-                        MIXSUFFIX(C2,N2)
-                    }
-                }
-                else
-                {
-                    if (Interpolation)
-                    {
-                        MIXPREFIX
+							MIXSUFFIX(C2, N2)
+					}
+				}
+				else
+				{
+					if (interpolation)
+					{
+						MIXPREFIX
 
-                        MIXNOLOOP
+							MIXNOLOOP
 
-                        MIXPART1(C3)
+							MIXPART1(C3)
 
-                        MIXINTERPOLINIT
+							MIXINTERPOLINIT
 
-                        MIXINTERPOL8BIT
+							MIXINTERPOL8BIT
 
-                        MIXSUFFIX(C3,N3)
-                    }
-                    else
-                    {
-                        MIXPREFIX
+							MIXSUFFIX(C3, N3)
+					}
+					else
+					{
+						MIXPREFIX
 
-                        MIXNOLOOP
+							MIXNOLOOP
 
-                        MIXPART1(C4)
+							MIXPART1(C4)
 
-                        MIXNEAREST8BIT
+							MIXNEAREST8BIT
 
-                        MIXSUFFIX(C4,N4)
-                    }
-                }
-            }
-            else
-            {
-                if (Ch.Is16Bit)
-                {
-                    if (Interpolation)
-                    {
-                        MIXPREFIX
+							MIXSUFFIX(C4, N4)
+					}
+				}
+			}
+			else
+			{
+				if (Ch.is16Bit)
+				{
+					if (interpolation)
+					{
+						MIXPREFIX
 
-                        MIXLOOP
+							MIXLOOP
 
-                        MIXPART1(C5)
+							MIXPART1(C5)
 
-                        MIXINTERPOLINIT
+							MIXINTERPOLINIT
 
-                        MIXINTERPOL16BIT
+							MIXINTERPOL16BIT
 
-                        MIXSUFFIX(C5,N5)
-                    }
-                    else
-                    {
-                        MIXPREFIX
+							MIXSUFFIX(C5, N5)
+					}
+					else
+					{
+						MIXPREFIX
 
-                        MIXLOOP
+							MIXLOOP
 
-                        MIXPART1(C6)
+							MIXPART1(C6)
 
-                        MIXNEAREST16BIT
+							MIXNEAREST16BIT
 
-                        MIXSUFFIX(C6,N6)
-                    }
-                }
-                else
-                {
-                    if (Interpolation)
-                    {
-                        MIXPREFIX
-
-                        MIXLOOP
-
-                        MIXPART1(C7)
-
-                        MIXINTERPOLINIT
-
-                        MIXINTERPOL8BIT
-
-                        MIXSUFFIX(C7,N7)
-                    }
-                    else
-                    {
-                        MIXPREFIX
-
-                        MIXLOOP
-
-                        MIXPART1(C8)
-
-                        MIXNEAREST8BIT
-
-                        MIXSUFFIX(C8,N8)
-                    }
-                }
-            }
-            i ++ ;
-        }
-    }
-
-    /*
-    static void FillBufferOld(int16_t *Buffer)
-    {
-        int i = 0;
-
-        StartTime = clock();
-
-        while (i < BufferSize)
-        {
-            if (Playing)
-                Timer += TimePerSample;
-
-            if (Timer >= TimePerTick)
-            {
-                NextTick();
-                UpdateChannelInfo();
-                Timer = fmod(Timer, TimePerTick);
-                //Timer -= TimePerTick;
-                UpdateTimer();
-            }
-
-            MixAudioOld(Buffer, i);
-
-            i ++ ;
-        }
-
-        EndTime = clock();
-        ExcuteTime = EndTime - StartTime;
-    }
-    */
-
-    static void FillBuffer(int16_t *Buffer)
-    {
-        int i = 0;
-
-        StartTime = clock();
-
-        memset(Buffer, 0, BufferSize<<2);
-        while (i < BufferSize)
-        {
-            if (Playing)
-            {
-                int MixLength = BufferSize;
-
-                if (i + SampleToNextTick >= BufferSize)
-                {
-                    MixLength = BufferSize - i;
-                    SampleToNextTick -= BufferSize - i;
-                }
-                else
-                {
-                    if (SampleToNextTick)
-                    {
-                        MixLength = SampleToNextTick;
-                        SampleToNextTick = 0;
-                    }
-                    else
-                    {
-                        NextTick();
-                        UpdateChannelInfo();
-                        Timer = fmod(Timer, TimePerTick);
-                        UpdateTimer();
-
-                        SampleToNextTick = SamplePerTick;
-                        MixLength = SampleToNextTick;
-                    }
-
-                    if (i + SampleToNextTick >= BufferSize)
-                    {
-                        MixLength = BufferSize - i;
-                        SampleToNextTick -= BufferSize - i;
-                    }
-                    else SampleToNextTick = 0;
-                }
-
-                MixAudio(Buffer, i, MixLength);
-
-                i += MixLength;
-            }
-            else break;
-        }
-
-        EndTime = clock();
-        ExcuteTime = EndTime - StartTime;
-    }
-
-    void SetLoop(bool LoopSong = true)
-    {
-        Loop = LoopSong;
-    }
-
-    void SetPanMode(int8_t Mode = 0)
-    {
-        PanMode = Mode;
-    }
-
-    void PlayPause(bool Play)
-    {
-        Playing = Play;
-        SDL_PauseAudioDevice(DeviceID, !Play);
-    }
-
-    bool IsPlaying()
-    {
-        return Playing;
-    }
-
-    void SetAmp(float Value)
-    {
-        if (Value >= 0.1 && Value <= 10)
-        {
-            Amp = Value;
-            RecalcAmp();
-        }
-    }
-
-    void SetStereo(bool UseStereo = false)
-    {
-        Stereo = UseStereo;
-    }
-
-    void SetInterpolation(bool UseInterpol = true)
-    {
-        Interpolation = UseInterpol;
-    }
-
-    void SetPos(int16_t Pos)
-    {
-        if (Pos < 0) Pos = 0;
-        if (Pos >= SongLength) Pos = SongLength - 1;
-
-        ResetChannels();
-        ResetPatternEffects();
-
-        Tick = Speed - 1;
-        CurRow = -1;
-        CurPos = Pos;
-    }
-
-    void SetIgnoreF00(bool True)
-    {
-        IgnoreF00 = True;
-    }
-
-    void SetVolume(uint8_t Volume)
-    {
-        MasterVol = Volume;
-    }
-
-    char *GetSongName() {
-        return SongName;
-    }
-
-    uint8_t *GetPatternOrder()
-    {
-        return OrderTable;
-    }
-
-    int16_t GetSpd()
-    {
-        return (int16_t)((Speed << 8) | Tempo);
-    }
-
-    int32_t GetPos() {
-        return (int32_t)(((CurPos & 0xFF) << 24) | ((OrderTable[CurPos] & 0xFF) << 16) | (CurRow & 0xFFFF));
-    }
-
-    int32_t GetSongInfo()
-    {
-        return (SongLength | (NumOfPatterns << 8) | (NumOfChannels << 16) | (NumOfInstruments << 24));
-    }
-
-    uint8_t GetActiveChannels()
-    {
-        if (!SongLoaded) return 0;
-
-        uint8_t Result = 0;
-        int i = 0;
-        while (i < NumOfChannels)
-        {
-            if (Ch.Active && Ch.SmpPlaying != -1 && Ch.SmpPlaying < TotalSampleNum) Result ++ ;
-            i ++ ;
-        }
-
-        return Result;
-    }
-
-    long GetExcuteTime()
-    {
-        return ExcuteTime;
-    }
-
-    bool IsLoaded()
-    {
-        return SongLoaded;
-    }
-
-    int16_t GetPatLen(uint8_t PatNum)
-    {
-        if (PatNum >= NumOfPatterns)
-        {
-            return 0;
-        }
-        return *(int16_t *)(PatternData + PatternAddr[PatNum]);
-    }
-
-    Note GetNote(int16_t Pos, int16_t Row, uint8_t Col)
-    {
-        Note ThisNote;
-        if (Pos < SongLength)
-        {
-            while (Row >= *(int16_t *)(PatternData + PatternAddr[OrderTable[Pos]]))
-            {
-                Row -= *(int16_t *)(PatternData + PatternAddr[OrderTable[Pos]]);
-                Pos ++ ;
-                if (Pos >= SongLength) goto End;
-            }
-            while (Row < 0)
-            {
-                Pos -- ;
-                if (Pos < 0) goto End;
-                Row += *(int16_t *)(PatternData + PatternAddr[OrderTable[Pos]]);
-            }
-        }
-        else goto End;
-
-        if (Col < NumOfChannels)
-        {
-            ThisNote = *(Note *)(PatternData + PatternAddr[OrderTable[Pos]] + ROW_SIZE_XM*Row + Col*NOTE_SIZE_XM + 2);
-        }
-        else
-        {
-            End:
-            ThisNote.Note = 255;
-            ThisNote.Instrument = ThisNote.VolCmd = ThisNote.Effect = ThisNote.Parameter = 0;
-        }
-
-        return ThisNote;
-    }
-
-    static void WriteBufferCallback(void *UserData, uint8_t *Buffer, int Length)
-    {
-        FillBuffer((int16_t *)Buffer);
-    }
-
-    bool PlayModule()
-    {
-        if (!SongLoaded) return false;
-
-        /*
-        int i = 0;
-        while (i < 2)
-        {
-            if (SndBuffer[i] != nullptr)
-                free SndBuffer[i]);
-
-            SndBuffer[i] = (int16_t *)malloc(BufferSize);
-            if (SndBuffer[i] == nullptr) return false;
-
-            i ++ ;
-        }
-        */
-
-        SDL_InitSubSystem(SDL_INIT_AUDIO);
-
-        SDL_zero(AudioSpec);
-
-        AudioSpec.freq = SamplingRate;
-        AudioSpec.format = AUDIO_S16;
-        AudioSpec.channels = 2;
-        AudioSpec.samples = BufferSize;
-        AudioSpec.callback = WriteBufferCallback;
-        DeviceID = SDL_OpenAudioDevice(NULL, 0, &AudioSpec, &ActualSpec, 0);
-
-        if (DeviceID != 0)
-        {
-            BufferSize = ActualSpec.samples;
-            SDL_PauseAudioDevice(DeviceID, 0);
-            Playing = true;
-        }
-
-        return true;
-    }
-
-    bool StopModule()
-    {
-        SDL_CloseAudioDevice(DeviceID);
-        return true;
-    }
-
-    void CleanUp()
-    {
-        Playing = false;
-        SongLoaded = false;
-        StopModule();
-
-        if (Channels != NULL)
-            free(Channels);
-
-        if (PatternData != NULL)
-            free(PatternData);
-
-        if (Instruments != NULL)
-            free(Instruments);
-
-        if (Samples != NULL)
-            free(Samples);
-
-        /*
-        int i = 0;
-        while (i < 2)
-        {
-            if (SndBuffer[i] != nullptr)
-                free SndBuffer[i]);
-
-        }
-        */
-    }
+							MIXSUFFIX(C6, N6)
+					}
+				}
+				else
+				{
+					if (interpolation)
+					{
+						MIXPREFIX
+
+							MIXLOOP
+
+							MIXPART1(C7)
+
+							MIXINTERPOLINIT
+
+							MIXINTERPOL8BIT
+
+							MIXSUFFIX(C7, N7)
+					}
+					else
+					{
+						MIXPREFIX
+
+							MIXLOOP
+
+							MIXPART1(C8)
+
+							MIXNEAREST8BIT
+
+							MIXSUFFIX(C8, N8)
+					}
+				}
+			}
+			i ++;
+		}
+	}
+
+	/*
+	static void FillBufferOld(int16_t *buffer)
+	{
+		int i = 0;
+
+		startTime = clock();
+
+		while (i < bufferSize)
+		{
+			if (isPlaying)
+				timer += timePerSample;
+
+			if (timer >= timePerTick)
+			{
+				NextTick();
+				UpdateChannelInfo();
+				timer = fmod(timer, timePerTick);
+				//timer -= timePerTick;
+				UpdateTimer();
+			}
+
+			MixAudioOld(buffer, i);
+
+			i ++ ;
+		}
+
+		endTime = clock();
+		excuteTime = endTime - startTime;
+	}
+	*/
+
+	static void FillBuffer(int16_t *buffer)
+	{
+		int i = 0;
+
+		startTime = clock();
+
+		memset(buffer, 0, bufferSize << 2);
+		while (i < bufferSize)
+		{
+			if (isPlaying)
+			{
+				int mixLength = bufferSize;
+
+				if (i + sampleToNextTick >= bufferSize)
+				{
+					mixLength = bufferSize - i;
+					sampleToNextTick -= bufferSize - i;
+				}
+				else
+				{
+					if (sampleToNextTick)
+					{
+						mixLength = sampleToNextTick;
+						sampleToNextTick = 0;
+					}
+					else
+					{
+						NextTick();
+						UpdateChannelInfo();
+						timer = fmod(timer, timePerTick);
+						UpdateTimer();
+
+						sampleToNextTick = samplePerTick;
+						mixLength = sampleToNextTick;
+					}
+
+					if (i + sampleToNextTick >= bufferSize)
+					{
+						mixLength = bufferSize - i;
+						sampleToNextTick -= bufferSize - i;
+					}
+					else sampleToNextTick = 0;
+				}
+
+				MixAudio(buffer, i, mixLength);
+
+				i += mixLength;
+			}
+			else break;
+		}
+
+		endTime = clock();
+		excuteTime = endTime - startTime;
+	}
+
+	void SetLoop(bool loopSong = true)
+	{
+		loop = loopSong;
+	}
+
+	void SetPanMode(int8_t mode = 0)
+	{
+		panMode = mode;
+	}
+
+	void PlayPause(bool play)
+	{
+		isPlaying = play;
+#ifdef _SDL2
+		SDL_PauseAudioDevice(DeviceID, !Play);
+#endif
+#ifdef _SFML
+		if (customStream != NULL)
+		{
+			if (isPlaying)
+				customStream->play();
+			else
+				customStream->stop();
+		}
+#endif
+	}
+
+	bool IsPlaying()
+	{
+		return isPlaying;
+	}
+
+	void SetAmp(float Value)
+	{
+		if (Value >= 0.1 && Value <= 10)
+		{
+			amplifier = Value;
+			RecalcAmp();
+		}
+	}
+
+	void SetStereo(bool UseStereo = false)
+	{
+		stereo = UseStereo;
+	}
+
+	void SetInterpolation(bool useInterpolation = true)
+	{
+		interpolation = useInterpolation;
+	}
+
+	void SetPos(int16_t pos)
+	{
+		if (pos < 0) pos = 0;
+		if (pos >= songLength) pos = songLength - 1;
+
+		ResetChannels();
+		ResetPatternEffects();
+
+		tick = speed - 1;
+		curRow = -1;
+		curPos = pos;
+	}
+
+	void SetIgnoreF00(bool trueFalse)
+	{
+		ignoreF00 = trueFalse;
+	}
+
+	void SetVolume(uint8_t volume)
+	{
+		masterVolume = volume;
+	}
+
+	char *GetSongName() {
+		return songName;
+	}
+
+	uint8_t *GetPatternOrder()
+	{
+		return orderTable;
+	}
+
+	int16_t GetSpd()
+	{
+		return (int16_t)((speed << 8) | tempo);
+	}
+
+	int32_t GetPos() {
+		return (int32_t)(((curPos & 0xFF) << 24) | ((orderTable[curPos] & 0xFF) << 16) | (curRow & 0xFFFF));
+	}
+
+	int32_t GetSongInfo()
+	{
+		return (songLength | (numOfPatterns << 8) | (numOfChannels << 16) | (numOfInstruments << 24));
+	}
+
+	uint8_t GetActiveChannels()
+	{
+		if (!songLoaded) return 0;
+
+		uint8_t result = 0;
+		int i = 0;
+		while (i < numOfChannels)
+		{
+			if (Ch.active && Ch.samplePlaying != -1 && Ch.samplePlaying < totalSampleNum) result ++;
+			i ++;
+		}
+
+		return result;
+	}
+
+	long GetExcuteTime()
+	{
+		return excuteTime;
+	}
+
+	bool IsLoaded()
+	{
+		return songLoaded;
+	}
+
+	int16_t GetPatLen(uint8_t patNum)
+	{
+		if (patNum >= numOfPatterns)
+		{
+			return 0;
+		}
+		return *(int16_t *)(patternData + patternAddr[patNum]);
+	}
+
+	Note GetNotePat(int16_t pos, int16_t row, uint8_t col)
+	{
+		Note thisNote;
+		if (pos < songLength)
+		{
+			while (row >= *(int16_t *)(patternData + patternAddr[orderTable[pos]]))
+			{
+				row -= *(int16_t *)(patternData + patternAddr[orderTable[pos]]);
+				pos ++;
+				if (pos >= songLength) goto End;
+			}
+			while (row < 0)
+			{
+				pos --;
+				if (pos < 0) goto End;
+				row += *(int16_t *)(patternData + patternAddr[orderTable[pos]]);
+			}
+		}
+		else goto End;
+
+		if (col < numOfChannels)
+		{
+			thisNote = *(Note *)(patternData + patternAddr[orderTable[pos]] + ROW_SIZE_XM * row + col * NOTE_SIZE_XM + 2);
+		}
+		else
+		{
+		End:
+			thisNote.note = 255;
+			thisNote.instrument = thisNote.volCmd = thisNote.effect = thisNote.parameter = 0;
+		}
+
+		return thisNote;
+	}
+
+	static void WriteBufferCallback(void *userData, uint8_t *buffer, int length)
+	{
+		FillBuffer((int16_t *)buffer);
+	}
+
+	bool PlayModule()
+	{
+		if (!songLoaded)
+			return false;
+
+		/*
+		int i = 0;
+		while (i < 2)
+		{
+			if (SndBuffer[i] != nullptr)
+				free SndBuffer[i]);
+
+			SndBuffer[i] = (int16_t *)malloc(bufferSize);
+			if (SndBuffer[i] == nullptr) return false;
+
+			i ++ ;
+		}
+		*/
+
+#ifdef _SDL2
+		SDL_InitSubSystem(SDL_INIT_AUDIO);
+
+		SDL_zero(AudioSpec);
+
+		AudioSpec.freq = sampleRate;
+		AudioSpec.format = AUDIO_S16;
+		AudioSpec.channels = 2;
+		AudioSpec.samples = bufferSize;
+		AudioSpec.callback = WriteBufferCallback;
+		DeviceID = SDL_OpenAudioDevice(NULL, 0, &AudioSpec, &ActualSpec, 0);
+
+		if (DeviceID != 0)
+		{
+			bufferSize = ActualSpec.samples;
+			SDL_PauseAudioDevice(DeviceID, 0);
+			isPlaying = true;
+		}
+#endif
+#ifdef _SFML
+		if (customStream == NULL)
+			customStream = new CustomSoundStream();
+
+		isPlaying = true;
+		customStream->play();
+#endif
+
+		return true;
+	}
+
+	bool StopModule()
+	{
+#ifdef _SDL2
+		SDL_CloseAudioDevice(DeviceID);
+#endif
+#ifdef _SFML
+		if (customStream != NULL)
+			customStream->stop();
+#endif
+		isPlaying = false;
+		return true;
+	}
+
+	void CleanUp()
+	{
+		isPlaying = false;
+		songLoaded = false;
+		StopModule();
+
+#ifdef _SFML
+		if (customStream != NULL)
+			delete customStream;
+#endif
+
+		if (channels != NULL)
+			free(channels);
+
+		if (patternData != NULL)
+			free(patternData);
+
+		if (instruments != NULL)
+			free(instruments);
+
+		if (samples != NULL)
+			free(samples);
+
+		/*
+		int i = 0;
+		while (i < 2)
+		{
+			if (SndBuffer[i] != nullptr)
+				free SndBuffer[i]);
+
+		}
+		*/
+	}
 }

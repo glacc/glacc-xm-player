@@ -155,7 +155,7 @@ namespace GXMPatternView
             {
                 if (PosY != 0)
                 {
-                    GXMPlayer::Note ThisNote = GXMPlayer::GetNote(Pos, RelRow, PosX);
+                    GXMPlayer::Note ThisNote = GXMPlayer::GetNotePat(Pos, RelRow, PosX);
                     if (ThisNote.Note != 255)
                     {
                         //Note

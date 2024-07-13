@@ -39,7 +39,7 @@ namespace GXMPlayer
     int32_t GetPos();
     int32_t GetSongInfo();
     int16_t GetPatLen(uint8_t PatNum);
-    Note GetNote(int16_t Pos, int16_t Row, uint8_t Col);
+    Note GetNotePat(int16_t Pos, int16_t Row, uint8_t Col);
     uint8_t *GetPatternOrder();
     char *GetSongName();
     long GetExcuteTime();

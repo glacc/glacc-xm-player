@@ -2495,7 +2495,7 @@ namespace GXMPlayer
 	{
 		isPlaying = play;
 #ifdef _SDL2
-		SDL_PauseAudioDevice(DeviceID, !Play);
+		SDL_PauseAudioDevice(DeviceID, !play);
 #endif
 #ifdef _SFML
 		if (customStream != NULL)
